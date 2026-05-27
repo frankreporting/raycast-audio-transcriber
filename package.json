@@ -1,0 +1,60 @@
+{
+  "$schema": "https://www.raycast.com/schemas/extension.json",
+  "name": "audio-transcriber-for-raycast",
+  "title": "Audio Transcriber for Raycast",
+  "description": "Transcribe local audio/video files with speaker diarization",
+  "icon": "icon.png",
+  "author": "brianfrank",
+  "categories": ["Productivity"],
+  "license": "MIT",
+  "commands": [
+    {
+      "name": "transcribe",
+      "title": "Transcribe",
+      "description": "Transcribe a local audio or video file with speaker diarization",
+      "mode": "view"
+    }
+  ],
+  "preferences": [
+    {
+      "name": "apiKey",
+      "title": "AssemblyAI API Key",
+      "description": "Get one at assemblyai.com/dashboard",
+      "type": "password",
+      "required": true
+    },
+    {
+      "name": "defaultFormat",
+      "title": "Default output format",
+      "description": "Initial selection in the format dropdown",
+      "type": "dropdown",
+      "required": false,
+      "default": "markdown",
+      "data": [
+        { "title": "Plain text (Speaker A: ...)", "value": "txt" },
+        { "title": "Markdown with timestamps", "value": "markdown" },
+        { "title": "Raw JSON", "value": "json" }
+      ]
+    }
+  ],
+  "dependencies": {
+    "@raycast/api": "^1.80.0",
+    "@raycast/utils": "^1.17.0",
+    "assemblyai": "^4.8.0"
+  },
+  "devDependencies": {
+    "@raycast/eslint-config": "^1.0.11",
+    "@types/node": "22.13.10",
+    "@types/react": "19.0.10",
+    "eslint": "^8.57.0",
+    "prettier": "^3.3.3",
+    "typescript": "^5.4.5"
+  },
+  "scripts": {
+    "build": "ray build -e dist",
+    "dev": "ray develop",
+    "fix-lint": "ray lint --fix",
+    "lint": "ray lint",
+    "publish": "npx @raycast/api@latest publish"
+  }
+}
