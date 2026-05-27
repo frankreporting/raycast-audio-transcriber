@@ -1,6 +1,6 @@
 # Audio Transcriber for Raycast
 
-A [Raycast](https://www.raycast.com) extension that transcribes local audio and video files using [AssemblyAI](https://www.assemblyai.com), with speaker diarization, key-term boosting, and a few output formats.
+A [Raycast](https://www.raycast.com) extension that transcribes local audio and video files with speaker diarization and a few output formats. Supports two backends: **AssemblyAI** (cloud, any Mac) and **Local Parakeet** (on-device via [FluidAudio](https://github.com/FluidInference/FluidAudio), Apple Silicon only).
 
 Pick a file from disk, get back a clean transcript you can copy, paste, or save next to the source file. Speakers are labeled (`Speaker A`, `Speaker B`, ...) and can be renamed in-place.
 
@@ -10,7 +10,8 @@ Pick a file from disk, get back a clean transcript you can copy, paste, or save 
 
 - macOS with [Raycast](https://www.raycast.com) installed
 - [Node.js](https://nodejs.org) 20.x or newer (`node --version` to check)
-- An [AssemblyAI](https://www.assemblyai.com/dashboard) API key (free tier works fine for trying it out)
+- **AssemblyAI backend:** an [AssemblyAI API key](https://www.assemblyai.com/dashboard) (free tier works)
+- **Local Parakeet backend:** Apple Silicon (M1 or newer) + Xcode Command Line Tools (see below)
 
 ## Install
 
@@ -68,13 +69,68 @@ Open Raycast → ⌘ + , → Extensions → Audio Transcriber for Raycast.
 
 | Preference | What it does |
 | --- | --- |
-| **AssemblyAI API Key** | Required. Get one at [assemblyai.com/dashboard](https://www.assemblyai.com/dashboard). |
+| **AssemblyAI API Key** | Get one at [assemblyai.com/dashboard](https://www.assemblyai.com/dashboard). Not needed if you only use the Local Parakeet backend. |
 | **Default output format** | Which format the dropdown starts on. You can still switch per-transcript. |
+| **Default key terms** | Comma-separated names/terms that pre-fill the Key terms field on every run. Edit per-transcription to override (e.g., remove "Vaughn Wallace" and add "Vaughan" for one interview). AssemblyAI only — ignored by Local Parakeet. |
+| **Transcription backend** | AssemblyAI (default), Local Parakeet, or Parakeet-with-AssemblyAI-fallback. |
+| **Parakeet binary path** | Full path to the `fluidaudiocli` binary. Required for Local Parakeet. See below. |
+
+## Local Parakeet backend (optional, Apple Silicon only)
+
+The Local Parakeet backend runs transcription (NVIDIA Parakeet TDT v3) and speaker diarization entirely on your Mac — no audio leaves the machine. On an M-series chip it typically processes an hour of audio in under a minute.
+
+**Requires:** Apple Silicon (M1 or newer). Does not work on Intel Macs.
+
+### 1. Install Xcode Command Line Tools
+
+If you haven't already:
+
+```bash
+xcode-select --install
+```
+
+### 2. Build the FluidAudio CLI
+
+Clone the FluidAudio repo somewhere permanent (don't delete it after building):
+
+```bash
+git clone https://github.com/FluidInference/FluidAudio.git ~/FluidAudio
+cd ~/FluidAudio
+swift build -c release
+```
+
+This takes a few minutes the first time. The binary ends up at:
+
+```
+~/FluidAudio/.build/release/fluidaudiocli
+```
+
+### 3. Configure Raycast
+
+Open Raycast → ⌘ + , → Extensions → Audio Transcriber for Raycast and set:
+
+- **Transcription backend** → `Local Parakeet (on-device, Apple Silicon)`
+- **Parakeet binary path** → `/Users/yourname/FluidAudio/.build/release/fluidaudiocli`
+
+### 4. First run — model download
+
+The first time you run a transcription with Parakeet, FluidAudio automatically downloads the required ML models (~500 MB) from Hugging Face. This happens once; subsequent runs use the cached models. Expect the first transcription to take longer than usual while models download.
+
+### Updating FluidAudio later
+
+```bash
+cd ~/FluidAudio
+git pull
+swift build -c release
+```
+
+No Raycast changes needed — the binary path stays the same.
 
 ## Notes & limitations
 
-- The extension uploads your audio to AssemblyAI's API. If that's a problem for your use case, this isn't the right tool — a local-model backend is on the roadmap but not shipped.
-- Very large video files (>1 GB) may time out during upload. Extract the audio first with `ffmpeg` if you hit this.
+- **AssemblyAI** uploads your audio to the cloud. Use Local Parakeet if that's a concern.
+- **Key terms** (proper noun boosting) are only supported by the AssemblyAI backend; they're silently ignored on Local Parakeet.
+- Very large video files (>1 GB) may time out during AssemblyAI upload. Extract the audio first with `ffmpeg` if you hit this.
 - AssemblyAI requires audio longer than ~160 ms.
 - Cancelling a transcription mid-flight isn't supported in this version.
 

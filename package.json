@@ -19,9 +19,9 @@
     {
       "name": "apiKey",
       "title": "AssemblyAI API Key",
-      "description": "Get one at assemblyai.com/dashboard",
+      "description": "Get one at assemblyai.com/dashboard. Not required if using Local Parakeet backend only.",
       "type": "password",
-      "required": true
+      "required": false
     },
     {
       "name": "defaultFormat",
@@ -35,6 +35,35 @@
         { "title": "Markdown with timestamps", "value": "markdown" },
         { "title": "Raw JSON", "value": "json" }
       ]
+    },
+    {
+      "name": "defaultKeyTerms",
+      "title": "Default key terms",
+      "description": "Comma-separated names/terms pre-filled into every transcription. Edit per-run in the form to override.",
+      "type": "textfield",
+      "required": false,
+      "default": ""
+    },
+    {
+      "name": "transcriptionBackend",
+      "title": "Transcription backend",
+      "description": "AssemblyAI sends audio to the cloud. Local Parakeet runs on-device (Apple Silicon only).",
+      "type": "dropdown",
+      "required": false,
+      "default": "assemblyai",
+      "data": [
+        { "title": "AssemblyAI (cloud, recommended)", "value": "assemblyai" },
+        { "title": "Local Parakeet (on-device, Apple Silicon)", "value": "parakeet" },
+        { "title": "Local Parakeet → fallback to AssemblyAI", "value": "parakeet-fallback" }
+      ]
+    },
+    {
+      "name": "parakeetBinaryPath",
+      "title": "Parakeet binary path",
+      "description": "Full path to the fluidaudiocli binary. Required when using Local Parakeet. See README for build instructions.",
+      "type": "textfield",
+      "required": false,
+      "default": ""
     }
   ],
   "dependencies": {

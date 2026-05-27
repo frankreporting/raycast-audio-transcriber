@@ -11,7 +11,7 @@ export default function TranscribeCommand() {
   const [filePaths, setFilePaths] = useState<string[]>([]);
   const [format, setFormat] = useState<OutputFormat>(prefs.defaultFormat || "markdown");
   const [speakersExpected, setSpeakersExpected] = useState<string>("");
-  const [keyterms, setKeyterms] = useState<string>("");
+  const [keyterms, setKeyterms] = useState<string>(prefs.defaultKeyTerms || "");
   const [isLoading, setIsLoading] = useState(false);
 
   async function handleSubmit() {
@@ -89,7 +89,7 @@ export default function TranscribeCommand() {
         id="speakers"
         title="Speakers expected (optional)"
         placeholder="e.g. 2"
-        info="Helps diarization. Leave blank for auto-detect."
+        info="Enter a single number (e.g. 2). Helps diarization. Leave blank for auto-detect."
         value={speakersExpected}
         onChange={setSpeakersExpected}
       />

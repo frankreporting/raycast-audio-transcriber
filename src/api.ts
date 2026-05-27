@@ -1,6 +1,13 @@
+import { execFile } from "child_process";
+import { promisify } from "util";
+import * as fs from "fs";
+import * as os from "os";
+import * as path from "path";
 import { AssemblyAI } from "assemblyai";
 import { getPreferenceValues } from "@raycast/api";
 import { Preferences, TranscriptResult, Utterance } from "./types";
+
+const execFileAsync = promisify(execFile);
 
 export interface TranscribeOptions {
   audioPath: string;
@@ -9,14 +16,19 @@ export interface TranscribeOptions {
   onStatusUpdate?: (status: string) => void;
 }
 
-// Phase 1.5 will add LocalParakeetBackend behind this same interface.
+// Phase 1.5 adds LocalParakeetBackend behind this interface.
 export interface TranscriptionBackend {
   readonly name: string;
   transcribe(opts: TranscribeOptions): Promise<TranscriptResult>;
 }
 
+// --- AssemblyAI backend ---
+
 function getAssemblyAIClient(): AssemblyAI {
   const { apiKey } = getPreferenceValues<Preferences>();
+  if (!apiKey) {
+    throw new Error("AssemblyAI API key is not set. Add it in Raycast → Preferences → Extensions → Audio Transcriber.");
+  }
   return new AssemblyAI({ apiKey });
 }
 
@@ -64,12 +76,133 @@ export class AssemblyAIBackend implements TranscriptionBackend {
   }
 }
 
-// Phase 1: always AssemblyAI. Phase 1.5 will read a preference here.
+// --- Local Parakeet backend ---
+
+// Shape of fluidaudiocli transcribe --output-json <path>
+interface FluidTranscriptJSON {
+  text: string;
+  durationSeconds?: number;
+  wordTimings: Array<{
+    word: string;
+    startTime: number; // seconds
+    endTime: number;   // seconds
+  }>;
+}
+
+// Shape of fluidaudiocli process --output <path>
+interface FluidDiarizationJSON {
+  durationSeconds: number;
+  segments: Array<{
+    speakerId: string;
+    startTimeSeconds: number;
+    endTimeSeconds: number;
+  }>;
+}
+
+export class LocalParakeetBackend implements TranscriptionBackend {
+  readonly name = "Local Parakeet";
+
+  async transcribe(opts: TranscribeOptions): Promise<TranscriptResult> {
+    const { parakeetBinaryPath } = getPreferenceValues<Preferences>();
+    const binary = parakeetBinaryPath?.trim();
+    if (!binary) {
+      throw new Error(
+        "Parakeet binary path is not set. Build fluidaudiocli and set its path in Raycast → Preferences → Extensions → Audio Transcriber."
+      );
+    }
+
+    const tag = `raycast-${Date.now()}`;
+    const asrOut = path.join(os.tmpdir(), `${tag}-asr.json`);
+    const diarOut = path.join(os.tmpdir(), `${tag}-diar.json`);
+
+    try {
+      opts.onStatusUpdate?.("Transcribing locally (Parakeet)...");
+      await execFileAsync(binary, [
+        "transcribe",
+        opts.audioPath,
+        "--output-json", asrOut,
+        "--word-timestamps",
+      ]);
+
+      opts.onStatusUpdate?.("Identifying speakers...");
+      await execFileAsync(binary, [
+        "process",
+        opts.audioPath,
+        "--mode", "streaming",
+        "--output", diarOut,
+        ...(opts.speakersExpected ? ["--num-clusters", String(opts.speakersExpected)] : []),
+      ]);
+
+      const asrData = JSON.parse(fs.readFileSync(asrOut, "utf8")) as FluidTranscriptJSON;
+      const diarData = JSON.parse(fs.readFileSync(diarOut, "utf8")) as FluidDiarizationJSON;
+
+      // Map raw speakerIds (first-seen order) to letters A, B, C…
+      const letters = "ABCDEFGHIJKLMNOPQRSTUVWXYZ";
+      const speakerMap = new Map<string, string>();
+      const sorted = [...diarData.segments].sort((a, b) => a.startTimeSeconds - b.startTimeSeconds);
+      for (const seg of sorted) {
+        if (!speakerMap.has(seg.speakerId)) {
+          speakerMap.set(seg.speakerId, letters[speakerMap.size] ?? seg.speakerId);
+        }
+      }
+
+      // Merge: for each speaker segment, collect words whose startTime falls in that window
+      const utterances: Utterance[] = [];
+      for (const seg of sorted) {
+        const words = asrData.wordTimings.filter(
+          (w) => w.startTime >= seg.startTimeSeconds && w.startTime < seg.endTimeSeconds
+        );
+        if (words.length === 0) continue;
+        utterances.push({
+          speaker: speakerMap.get(seg.speakerId) ?? seg.speakerId,
+          text: words.map((w) => w.word).join(" "),
+          start: Math.round(seg.startTimeSeconds * 1000),
+          end: Math.round(seg.endTimeSeconds * 1000),
+        });
+      }
+
+      if (utterances.length === 0) {
+        throw new Error("No utterances produced. The audio may be silent or too short.");
+      }
+
+      return {
+        id: `local-${Date.now()}`,
+        text: asrData.text,
+        utterances,
+        audioPath: opts.audioPath,
+        audioDurationSec: asrData.durationSeconds ?? diarData.durationSeconds,
+        createdAt: new Date(),
+      };
+    } finally {
+      for (const f of [asrOut, diarOut]) {
+        try { fs.unlinkSync(f); } catch { /* best-effort cleanup */ }
+      }
+    }
+  }
+}
+
+// --- Backend selection ---
+
+// Phase 1: AssemblyAI. Phase 1.5: reads transcriptionBackend preference.
 export function getBackend(): TranscriptionBackend {
+  const { transcriptionBackend } = getPreferenceValues<Preferences>();
+  if (transcriptionBackend === "parakeet") {
+    return new LocalParakeetBackend();
+  }
   return new AssemblyAIBackend();
 }
 
 export async function transcribeFile(opts: TranscribeOptions): Promise<TranscriptResult> {
-  const backend = getBackend();
-  return backend.transcribe(opts);
+  const { transcriptionBackend } = getPreferenceValues<Preferences>();
+
+  if (transcriptionBackend === "parakeet-fallback") {
+    try {
+      return await new LocalParakeetBackend().transcribe(opts);
+    } catch {
+      opts.onStatusUpdate?.("Local Parakeet failed, falling back to AssemblyAI...");
+      return await new AssemblyAIBackend().transcribe(opts);
+    }
+  }
+
+  return getBackend().transcribe(opts);
 }

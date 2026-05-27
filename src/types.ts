@@ -1,8 +1,13 @@
 export type OutputFormat = "txt" | "markdown" | "json";
 
+export type TranscriptionBackendPref = "assemblyai" | "parakeet" | "parakeet-fallback";
+
 export interface Preferences {
   apiKey: string;
   defaultFormat: OutputFormat;
+  defaultKeyTerms: string;
+  transcriptionBackend: TranscriptionBackendPref;
+  parakeetBinaryPath: string;
 }
 
 export interface Utterance {
