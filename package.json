@@ -53,8 +53,8 @@
       "default": "assemblyai",
       "data": [
         { "title": "AssemblyAI (cloud)", "value": "assemblyai" },
-        { "title": "Local Parakeet (Apple Silicon only)", "value": "parakeet" },
-        { "title": "Local Parakeet, fallback to AssemblyAI", "value": "parakeet-fallback" }
+        { "title": "Parakeet (local, Silicon only)", "value": "parakeet" },
+        { "title": "Parakeet w/ AssemblyAI fallback", "value": "parakeet-fallback" }
       ]
     },
     {
