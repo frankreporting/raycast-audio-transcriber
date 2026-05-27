@@ -93,14 +93,16 @@ export default function TranscribeCommand() {
         value={speakersExpected}
         onChange={setSpeakersExpected}
       />
-      <Form.TextArea
-        id="keyterms"
-        title="Key terms (optional)"
-        placeholder="Hechinger, Nichole Dobo, Vaughn Wallace, edtech"
-        info="Comma-separated proper nouns, names, and domain terms. Boosts transcription accuracy. Up to 1,000 terms."
-        value={keyterms}
-        onChange={setKeyterms}
-      />
+      {prefs.transcriptionBackend !== "parakeet" && (
+        <Form.TextArea
+          id="keyterms"
+          title="Key terms (optional)"
+          placeholder="Hechinger, Nichole Dobo, Vaughn Wallace, edtech"
+          info="Comma-separated proper nouns, names, and domain terms. Boosts transcription accuracy. Up to 1,000 terms."
+          value={keyterms}
+          onChange={setKeyterms}
+        />
+      )}
     </Form>
   );
 }

@@ -39,7 +39,7 @@
     {
       "name": "defaultKeyTerms",
       "title": "Default key terms",
-      "description": "Comma-separated names/terms pre-filled into every transcription. Edit per-run in the form to override.",
+      "description": "Comma-separated names/terms pre-filled into every transcription. Edit per-run in the form to override. AssemblyAI backend only — ignored by Local Parakeet.",
       "type": "textfield",
       "required": false,
       "default": ""
