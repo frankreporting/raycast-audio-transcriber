@@ -110,7 +110,11 @@ This takes a few minutes the first time. The binary ends up at:
 Open Raycast → ⌘ + , → Extensions → Audio Transcriber for Raycast and set:
 
 - **Transcription backend** → `Local Parakeet (on-device, Apple Silicon)`
-- **Parakeet binary path** → `/Users/yourname/FluidAudio/.build/release/fluidaudiocli`
+- **Parakeet binary path** → the full path to the binary from step 2. To get the exact path, run this in Terminal:
+  ```bash
+  echo ~/FluidAudio/.build/release/fluidaudiocli
+  ```
+  Copy that output and paste it into the preference field.
 
 ### 4. First run — model download
 
