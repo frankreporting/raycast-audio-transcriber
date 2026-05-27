@@ -4,9 +4,7 @@ A [Raycast](https://www.raycast.com) extension that transcribes local audio and 
 
 Pick a file from disk, get back a clean transcript you can copy, paste, or save next to the source file. Speakers are labeled (`Speaker A`, `Speaker B`, ...) and can be renamed in-place.
 
-## Heads up: this is not in the Raycast Store
-
-This extension is distributed as source on GitHub, not through the Raycast Store. You install it by cloning this repo and registering it as a local extension with Raycast. The install is a one-time setup — once Raycast knows about it, you don't need to keep a dev server running. Details below.
+**Note: This is NOT in the Raycast Store.** You install it by cloning this repo and registering it as a local extension with Raycast. The install is a one-time setup. Details below.
 
 ## Requirements
 
