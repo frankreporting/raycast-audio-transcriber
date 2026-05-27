@@ -55,9 +55,9 @@ export default function TranscribeCommand() {
       push(<ResultsView result={result} initialFormat={format} />);
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);
-      toast.style = Toast.Style.Failure;
-      toast.title = "Transcription failed";
-      toast.message = message;
+      // Always create a fresh toast — the animated one may have been dismissed
+      // by the user while waiting, in which case mutating it silently does nothing.
+      await showToast({ style: Toast.Style.Failure, title: "Transcription failed", message });
     } finally {
       setIsLoading(false);
     }

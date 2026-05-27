@@ -115,23 +115,45 @@ export class LocalParakeetBackend implements TranscriptionBackend {
     const asrOut = path.join(os.tmpdir(), `${tag}-asr.json`);
     const diarOut = path.join(os.tmpdir(), `${tag}-diar.json`);
 
-    try {
-      opts.onStatusUpdate?.("Transcribing locally (Parakeet)...");
-      await execFileAsync(binary, [
-        "transcribe",
-        opts.audioPath,
-        "--output-json", asrOut,
-        "--word-timestamps",
-      ]);
+    // FluidAudio logs heavily to stderr (especially during first-run model download).
+    // Raise maxBuffer well above the default 1MB to avoid spurious ENOBUFS errors.
+    const execOpts = { maxBuffer: 200 * 1024 * 1024 };
 
-      opts.onStatusUpdate?.("Identifying speakers...");
-      await execFileAsync(binary, [
-        "process",
-        opts.audioPath,
-        "--mode", "streaming",
-        "--output", diarOut,
-        ...(opts.speakersExpected ? ["--num-clusters", String(opts.speakersExpected)] : []),
-      ]);
+    const runStep = async (args: string[], stepName: string) => {
+      try {
+        await execFileAsync(binary, args, execOpts);
+      } catch (err) {
+        const stderr = (err as { stderr?: string }).stderr?.slice(-1000) ?? "";
+        const msg = err instanceof Error ? err.message : String(err);
+        throw new Error(`Parakeet ${stepName} failed: ${msg}${stderr ? `\n\n${stderr}` : ""}`);
+      }
+    };
+
+    try {
+      opts.onStatusUpdate?.("Transcribing locally… (first run downloads models, may take a few minutes)");
+      await runStep(
+        ["transcribe", opts.audioPath, "--output-json", asrOut, "--word-timestamps"],
+        "transcription"
+      );
+
+      if (!fs.existsSync(asrOut)) {
+        throw new Error("Parakeet transcription produced no output. Check the binary path in preferences.");
+      }
+
+      opts.onStatusUpdate?.("Identifying speakers…");
+      await runStep(
+        [
+          "process", opts.audioPath,
+          "--mode", "streaming",
+          "--output", diarOut,
+          ...(opts.speakersExpected ? ["--num-clusters", String(opts.speakersExpected)] : []),
+        ],
+        "diarization"
+      );
+
+      if (!fs.existsSync(diarOut)) {
+        throw new Error("Parakeet diarization produced no output.");
+      }
 
       const asrData = JSON.parse(fs.readFileSync(asrOut, "utf8")) as FluidTranscriptJSON;
       const diarData = JSON.parse(fs.readFileSync(diarOut, "utf8")) as FluidDiarizationJSON;
