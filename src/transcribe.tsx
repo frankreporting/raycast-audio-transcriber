@@ -131,12 +131,23 @@ export default function TranscribeCommand() {
 
         if (done.length > 0) {
           const job = done[done.length - 1];
+          // Show isLoading on the form + a live toast so the user knows the
+          // result is being prepared (polish can take minutes for long audio).
+          setIsLoading(true);
+          const loadToast = await showToast({
+            style: Toast.Style.Animated,
+            title: "Loading completed transcription…",
+          });
           try {
-            const result = await loadJobResult(job);
+            const result = await loadJobResult(job, (status) => {
+              loadToast.title = status;
+            });
             const remaining = fresh.filter((j) => j.id !== job.id);
             await writeJobs(remaining);
             cleanupJob(job);
             saveCanonicalTranscript(result, format);
+            loadToast.style = Toast.Style.Success;
+            loadToast.title = "Transcription ready";
             push(<ResultsView result={result} initialFormat={format} />);
             pushedResult = true;
           } catch (err) {
@@ -148,6 +159,8 @@ export default function TranscribeCommand() {
             });
             cleanupJob(job);
             await writeJobs(fresh.filter((j) => j.id !== job.id));
+          } finally {
+            setIsLoading(false);
           }
         } else if (errored.length === 0 && running.length === 0) {
           await writeJobs(fresh);
@@ -263,7 +276,7 @@ export default function TranscribeCommand() {
 
   const submitTitle =
     prefs.transcriptionBackend === "parakeet"
-      ? "Start Transcription in Background"
+      ? "Start Transcription"
       : "Transcribe";
 
   return (

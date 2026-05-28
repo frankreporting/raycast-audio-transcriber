@@ -325,15 +325,18 @@ export class LocalParakeetBackend implements TranscriptionBackend {
         );
       }
 
-      opts.onStatusUpdate?.("Polishing transcript…");
-      utterances = await polishUtterances(utterances);
+      opts.onStatusUpdate?.(
+        `Polishing transcript (${utterances.length} utterances)…`,
+      );
+      utterances = await polishUtterances(utterances, opts.onStatusUpdate);
 
       return {
         id: `local-${Date.now()}`,
         text: asrData.text,
         utterances,
         audioPath: opts.audioPath,
-        audioDurationSec: asrData.durationSeconds ?? diarData.durationSeconds,
+        audioDurationSec:
+          asrData.durationSeconds || diarData.durationSeconds || 0,
         createdAt: new Date(),
       };
     } finally {
@@ -365,6 +368,7 @@ export class LocalParakeetBackend implements TranscriptionBackend {
 
 export async function polishUtterances(
   utterances: Utterance[],
+  onStatus?: (status: string) => void,
 ): Promise<Utterance[]> {
   const { llmPolish } = getPreferenceValues<Preferences>();
   if (!llmPolish || utterances.length === 0) return utterances;
@@ -382,6 +386,8 @@ export async function polishUtterances(
     utterances: utterances.map((u) => ({ text: u.text })),
   });
 
+  onStatus?.(`Polishing ${utterances.length} utterances on-device…`);
+
   const result = await new Promise<{
     ok: boolean;
     stdout: string;
@@ -396,7 +402,16 @@ export async function polishUtterances(
       stdout += chunk.toString();
     });
     child.stderr.on("data", (chunk: Buffer) => {
-      stderr += chunk.toString();
+      const s = chunk.toString();
+      stderr += s;
+      // The polish script emits "PROGRESS N/M" lines on stderr so we can
+      // surface per-utterance progress in the calling toast.
+      for (const line of s.split(/\r?\n/)) {
+        const m = line.match(/^PROGRESS (\d+)\/(\d+)$/);
+        if (m) {
+          onStatus?.(`Polishing utterance ${m[1]} of ${m[2]}…`);
+        }
+      }
     });
     child.on("error", (err) => {
       resolve({ ok: false, stdout: "", stderr: String(err) });
@@ -621,6 +636,7 @@ export function getJobStatus(job: ParakeetJob): ParakeetJobStatus {
 
 export async function loadJobResult(
   job: ParakeetJob,
+  onPolishStatus?: (status: string) => void,
 ): Promise<TranscriptResult> {
   const asrData = JSON.parse(
     fs.readFileSync(job.asrOut, "utf8"),
@@ -636,14 +652,15 @@ export async function loadJobResult(
     );
   }
 
-  utterances = await polishUtterances(utterances);
+  utterances = await polishUtterances(utterances, onPolishStatus);
 
   return {
     id: job.id,
     text: asrData.text,
     utterances,
     audioPath: job.audioPath,
-    audioDurationSec: asrData.durationSeconds ?? diarData.durationSeconds,
+    audioDurationSec:
+      asrData.durationSeconds || diarData.durationSeconds || 0,
     createdAt: new Date(job.createdAt),
   };
 }

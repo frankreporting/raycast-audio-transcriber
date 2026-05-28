@@ -71,7 +71,12 @@ guard let payload = try? JSONDecoder().decode(InPayload.self, from: inputData) e
     let session = LanguageModelSession(instructions: instructions)
     var polished: [String] = payload.utterances.map { $0.text }
 
+    let total = payload.utterances.count
     for (idx, utterance) in payload.utterances.enumerated() {
+      // Emit progress to stderr so the TS caller can surface it in toasts.
+      // Format is parseable: "PROGRESS <current>/<total>".
+      writeStderr("PROGRESS \(idx + 1)/\(total)\n")
+
       let original = utterance.text
       if original.trimmingCharacters(in: .whitespaces).isEmpty { continue }
 
