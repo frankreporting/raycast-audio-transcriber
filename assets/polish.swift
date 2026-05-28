@@ -99,6 +99,10 @@ func mergePolishedPunctuation(original: String, polished: String) -> String {
           }
           result += originalWords[origIdx + k].surface
         }
+        // After splicing missing words, ensure separation from polish word.
+        if matchedAt > 0, let lastChar = result.last, !lastChar.isWhitespace {
+          result += " "
+        }
         result += polishWord
         origIdx += matchedAt + 1
       }
@@ -114,7 +118,40 @@ func mergePolishedPunctuation(original: String, polished: String) -> String {
     result += originalWords[origIdx].surface
     origIdx += 1
   }
-  return result
+  return cleanupArtifacts(result)
+}
+
+// Collapse spacing/punctuation artifacts left by the merge process
+// (e.g. "  " from spliced gaps, ", ," when polish punctuation surrounded
+// a dropped word). Iterates to a fixed point so cascading fixes settle.
+func cleanupArtifacts(_ s: String) -> String {
+  var result = s
+  let pairs: [(String, String)] = [
+    ("  ", " "),
+    (" ,", ","),
+    (" .", "."),
+    (" ;", ";"),
+    (" :", ":"),
+    (" ?", "?"),
+    (" !", "!"),
+    (",,", ","),
+    ("..", "."),
+    (", ,", ","),
+    (", .", "."),
+    (",.", "."),
+    (".,", "."),
+  ]
+  var changed = true
+  while changed {
+    changed = false
+    for (from, to) in pairs {
+      if result.contains(from) {
+        result = result.replacingOccurrences(of: from, with: to)
+        changed = true
+      }
+    }
+  }
+  return result.trimmingCharacters(in: .whitespacesAndNewlines)
 }
 
 func writeStderr(_ s: String) {
@@ -166,6 +203,11 @@ guard let payload = try? JSONDecoder().decode(InPayload.self, from: inputData) e
     // input unchanged. Fresh sessions keep each call's context to just
     // (system instructions + one utterance), which gives consistent
     // polish quality across the full transcript.
+    //
+    // Low temperature (0.2) keeps output deterministic. Surrounding
+    // utterances go in the instructions, not the user message, so the
+    // polish target stays unambiguous.
+    let options = GenerationOptions(temperature: 0.2)
     var polished: [String] = payload.utterances.map { $0.text }
 
     let total = payload.utterances.count
@@ -177,9 +219,25 @@ guard let payload = try? JSONDecoder().decode(InPayload.self, from: inputData) e
       let original = utterance.text
       if original.trimmingCharacters(in: .whitespaces).isEmpty { continue }
 
-      let session = LanguageModelSession(instructions: instructions)
+      var contextualInstructions = instructions
+      let prev = idx > 0 ? payload.utterances[idx - 1].text : nil
+      let next = idx < payload.utterances.count - 1 ? payload.utterances[idx + 1].text : nil
+      if prev != nil || next != nil {
+        contextualInstructions += "\n\nFor context, here are the surrounding "
+        contextualInstructions += "utterances. DO NOT polish or include them in "
+        contextualInstructions += "your response — they are only to help you "
+        contextualInstructions += "understand the conversation rhythm."
+        if let prev = prev {
+          contextualInstructions += "\n\nPrevious utterance: \(prev)"
+        }
+        if let next = next {
+          contextualInstructions += "\n\nNext utterance: \(next)"
+        }
+      }
+
+      let session = LanguageModelSession(instructions: contextualInstructions)
       do {
-        let response = try await session.respond(to: original)
+        let response = try await session.respond(to: original, options: options)
         let candidate = response.content
           .trimmingCharacters(in: .whitespacesAndNewlines)
         if candidate.isEmpty { continue }
