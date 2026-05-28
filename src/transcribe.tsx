@@ -204,7 +204,6 @@ export default function TranscribeCommand() {
         push(
           <BackgroundStartedView
             audioPath={filePath}
-            jobId={job.id}
             startedAt={new Date(job.createdAt)}
           />,
         );
@@ -310,12 +309,6 @@ export default function TranscribeCommand() {
           info="Comma-separated proper nouns, names, and domain terms. Boosts transcription accuracy. Up to 1,000 terms."
           value={keyterms}
           onChange={setKeyterms}
-        />
-      )}
-      {prefs.transcriptionBackend === "parakeet" && (
-        <Form.Description
-          title="Background mode"
-          text="Parakeet runs on-device and can take a few minutes. It will continue in the background after you close Raycast and notify you when complete. Reopen Transcribe to view results."
         />
       )}
     </Form>
