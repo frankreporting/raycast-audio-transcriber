@@ -1,20 +1,54 @@
 import {
   MenuBarExtra,
   Icon,
+  Alert,
   LocalStorage,
   launchCommand,
   LaunchType,
   openExtensionPreferences,
+  confirmAlert,
+  showToast,
+  Toast,
   open,
 } from "@raycast/api";
 import { useEffect, useState } from "react";
+import { execFile } from "child_process";
+import { promisify } from "util";
 import * as path from "path";
 import { cleanupJob, getJobStatus, isJobStale } from "./api";
 import { listLibraryRecent, getLibraryFolder, LibraryItem } from "./library";
 import { ParakeetJob } from "./types";
 
+const execFileAsync = promisify(execFile);
+
 const JOBS_KEY = "parakeet-jobs";
 const RECENT_LIMIT = 8;
+
+// Cancel an in-flight job: kill its detached bg processes (sh wrapper +
+// fluidaudiocli + swift prepare.swift all contain the unique job id in
+// their command lines), wipe the job dir, and drop it from LocalStorage.
+// pkill exits non-zero when nothing matched, which is fine — that means
+// the bg pipeline already finished and only cleanup remains.
+async function cancelJob(job: ParakeetJob): Promise<void> {
+  try {
+    await execFileAsync("pkill", ["-f", job.id]);
+  } catch {
+    // No processes matched — already finished. Continue with cleanup.
+  }
+  cleanupJob(job);
+  const raw = await LocalStorage.getItem<string>(JOBS_KEY);
+  if (raw) {
+    try {
+      const jobs = JSON.parse(raw) as ParakeetJob[];
+      await LocalStorage.setItem(
+        JOBS_KEY,
+        JSON.stringify(jobs.filter((j) => j.id !== job.id)),
+      );
+    } catch {
+      // ignore parse errors
+    }
+  }
+}
 
 interface JobBuckets {
   running: ParakeetJob[];
@@ -108,11 +142,14 @@ export default function MenuBarStatus() {
   const erroredCount = buckets.errored.length;
   const totalPending = runningCount + readyCount + erroredCount;
 
-  // Always render the menu bar icon — a passive indicator that the command
-  // is enabled. When the queue is empty the icon is just the mic glyph; when
-  // jobs are in flight or ready, a count appears alongside. (Earlier version
-  // auto-hid when idle, but that made it impossible to tell "command is on
-  // but nothing pending" from "command isn't enabled".)
+  // Auto-hide when there's nothing pending. The icon appears the moment a
+  // new job starts (Transcribe form calls launchCommand to force a refresh)
+  // and disappears on the next poll tick after the user views/handles the
+  // result. While loading on first tick, also render nothing to avoid a
+  // brief flash that then vanishes.
+  if (isLoading || totalPending === 0) {
+    return null;
+  }
 
   // Menu bar title: prioritize "ready/errored" cues over running counts
   // since those are actionable. Keep it short (menu bar real estate is small).
@@ -145,15 +182,47 @@ export default function MenuBarStatus() {
       isLoading={isLoading}
     >
       {buckets.running.length > 0 && (
-        <MenuBarExtra.Section title="Transcribing">
+        <MenuBarExtra.Section title="Transcribing (click to cancel)">
           {buckets.running.map((job) => (
             <MenuBarExtra.Item
               key={job.id}
               icon={Icon.CircleProgress}
               title={path.basename(job.audioPath)}
               subtitle={`${elapsed(job.createdAt)} elapsed`}
+              onAction={async () => {
+                await cancelJob(job);
+                await showToast({
+                  style: Toast.Style.Success,
+                  title: "Transcription cancelled",
+                  message: path.basename(job.audioPath),
+                });
+              }}
             />
           ))}
+          {buckets.running.length > 1 && (
+            <MenuBarExtra.Item
+              icon={Icon.XMarkCircle}
+              title="Cancel all transcriptions"
+              onAction={async () => {
+                const confirmed = await confirmAlert({
+                  title: `Cancel ${buckets.running.length} transcriptions?`,
+                  message: "All in-flight Parakeet jobs will be stopped and removed.",
+                  primaryAction: {
+                    title: "Cancel All",
+                    style: Alert.ActionStyle.Destructive,
+                  },
+                });
+                if (!confirmed) return;
+                for (const job of buckets.running) {
+                  await cancelJob(job);
+                }
+                await showToast({
+                  style: Toast.Style.Success,
+                  title: `${buckets.running.length} transcriptions cancelled`,
+                });
+              }}
+            />
+          )}
         </MenuBarExtra.Section>
       )}
 
