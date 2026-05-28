@@ -13,6 +13,8 @@ export interface Preferences {
   parakeetBinaryPath: string;
   transcriptsFolder: string;
   notifyOnComplete: boolean;
+  llmPolish: boolean;
+  anthropicApiKey: string;
 }
 
 export interface Utterance {

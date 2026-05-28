@@ -115,6 +115,8 @@ Open Raycast → ⌘ + , → Extensions → Audio Transcriber for Raycast.
 | **Parakeet binary path** | Full path to the `fluidaudiocli` binary. Required for Local Parakeet. See below. |
 | **Transcripts library folder** | Folder where every successful transcription auto-saves a JSON sidecar. Enables the **Review Transcriptions** browse command. Leave blank to keep the old "save next to source file" behavior with no library. |
 | **Alert when background transcription completes** | Off by default — background Parakeet jobs complete silently and you check Review Transcriptions when you're ready. Turn on to get a macOS notification + auto-open Raycast. See the Local Parakeet section for `terminal-notifier` install notes. |
+| **Polish Parakeet output with Claude** | Off by default. When on, every Parakeet transcript is sent through Claude Haiku to add disfluency punctuation ("um", "ah"), em-dashes for self-corrections, sentence-boundary fixes from mid-segment splits, and proper capitalization. Costs ~$0.001 per transcript and adds a few seconds. AssemblyAI already polishes server-side — this only runs for Parakeet. Requires the Anthropic API key below. |
+| **Anthropic API key** | Required only if the polish setting above is enabled. Get one at [console.anthropic.com](https://console.anthropic.com). Stored in macOS Keychain via Raycast. |
 
 ## Local Parakeet backend (optional, Apple Silicon only)
 

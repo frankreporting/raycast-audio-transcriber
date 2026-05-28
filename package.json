@@ -94,6 +94,22 @@
       "type": "checkbox",
       "required": false,
       "default": false
+    },
+    {
+      "name": "llmPolish",
+      "title": "Polish Parakeet output with Claude",
+      "label": "Add commas, em-dashes, and natural reading flow",
+      "description": "After Parakeet transcribes, send the text through Claude Haiku to add punctuation around disfluencies (um, ah), em-dashes for self-corrections (\"code coding\" → \"code—coding\"), and fix sentence-boundary issues from mid-sentence diarization splits. Costs roughly $0.001 per transcript. Requires an Anthropic API key below. AssemblyAI already polishes — this only runs for Parakeet.",
+      "type": "checkbox",
+      "required": false,
+      "default": false
+    },
+    {
+      "name": "anthropicApiKey",
+      "title": "Anthropic API key",
+      "description": "Required for LLM Polish above. Get one at console.anthropic.com. Stored in macOS Keychain via Raycast.",
+      "type": "password",
+      "required": false
     }
   ],
   "dependencies": {

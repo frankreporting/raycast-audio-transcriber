@@ -132,7 +132,7 @@ export default function TranscribeCommand() {
         if (done.length > 0) {
           const job = done[done.length - 1];
           try {
-            const result = loadJobResult(job);
+            const result = await loadJobResult(job);
             const remaining = fresh.filter((j) => j.id !== job.id);
             await writeJobs(remaining);
             cleanupJob(job);
