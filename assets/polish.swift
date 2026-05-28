@@ -22,6 +22,11 @@ func wordCount(_ s: String) -> Int {
 }
 
 // Extract a normalized word sequence: lowercase, letters and digits only.
+// Apostrophes are IGNORED (neither part of words nor separators), so
+// contractions match their bare form — "that's" and "thats" both
+// tokenize to ["thats"]. This lets polish's apostrophe additions
+// (e.g., "wouldnt" → "wouldn't") pass the word-preservation validator
+// directly rather than getting kicked to the merge fallback.
 func wordTokens(_ s: String) -> [String] {
   var tokens: [String] = []
   var current = ""
@@ -29,6 +34,9 @@ func wordTokens(_ s: String) -> [String] {
     let c = Character(scalar)
     if c.isLetter || c.isNumber {
       current.append(c)
+    } else if c == "'" {
+      // skip apostrophe — neither add nor end current word
+      continue
     } else if !current.isEmpty {
       tokens.append(current)
       current = ""
