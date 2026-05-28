@@ -4,7 +4,7 @@ import * as fs from "fs";
 import * as os from "os";
 import * as path from "path";
 import { AssemblyAI } from "assemblyai";
-import { getPreferenceValues } from "@raycast/api";
+import { environment, getPreferenceValues } from "@raycast/api";
 import {
   ParakeetJob,
   ParakeetJobStatus,
@@ -515,7 +515,7 @@ function getJobsRootDir(): string {
 }
 
 export function startParakeetJob(opts: TranscribeOptions): ParakeetJob {
-  const { parakeetBinaryPath, notifyOnComplete } =
+  const { parakeetBinaryPath, notifyOnComplete, llmPolish } =
     getPreferenceValues<Preferences>();
   const binary = parakeetBinaryPath?.trim();
   if (!binary) {
@@ -533,10 +533,16 @@ export function startParakeetJob(opts: TranscribeOptions): ParakeetJob {
 
   const asrOut = path.join(jobDir, "asr.json");
   const diarOut = path.join(jobDir, "diar.json");
+  const finalOut = path.join(jobDir, "final.json");
   const doneFlag = path.join(jobDir, "done");
   const errorFlag = path.join(jobDir, "error");
   const logPath = path.join(jobDir, "run.log");
   const scriptPath = path.join(jobDir, "run.sh");
+
+  // Path to the bundled prepare.swift. We resolve it now (at job-start time)
+  // so the path is baked into the detached shell script and doesn't depend
+  // on Raycast still being around when the job actually runs.
+  const prepareScript = path.join(environment.assetsPath, "prepare.swift");
 
   // Offline mode runs VBx clustering with full audio context — much more
   // accurate than streaming, and --num-speakers is a hard constraint when set
@@ -544,6 +550,8 @@ export function startParakeetJob(opts: TranscribeOptions): ParakeetJob {
   const numSpeakersArgs = opts.speakersExpected
     ? `--num-speakers ${shEscape(String(opts.speakersExpected))}`
     : "";
+
+  const polishFlag = llmPolish ? "--polish" : "";
 
   // Strip double quotes from the basename — osascript embeds it in a "..."
   // string literal where unescaped quotes would break the AppleScript.
@@ -553,17 +561,17 @@ export function startParakeetJob(opts: TranscribeOptions): ParakeetJob {
   const deeplinkUrl =
     "raycast://extensions/brianfrank/audio-transcriber-for-raycast/transcribe";
 
-  // The script:
-  //   1. Adds Homebrew bin dirs to PATH so terminal-notifier (typically in
-  //      /opt/homebrew/bin or /usr/local/bin) is reachable.
-  //   2. Defines a `notify` helper that prefers terminal-notifier (Raycast
-  //      icon + clickable) and falls back to osascript (Script Editor icon,
-  //      no click action) if terminal-notifier isn't installed.
-  //   3. Runs the two fluidaudiocli steps with output captured to a log file.
-  //   4. Writes a done/error flag. If notifyOnComplete is enabled, fires a
-  //      notification and deeplinks back into Raycast. Otherwise completes
-  //      silently — the user checks Review Transcriptions when ready.
-  // The whole thing runs detached so it survives Raycast death.
+  // The detached bg script runs the ENTIRE pipeline so the user never has to
+  // keep Raycast open:
+  //   1. fluidaudiocli transcribe (audio → asr.json)
+  //   2. fluidaudiocli process (audio → diar.json with speaker segments)
+  //   3. swift prepare.swift (merges + optionally polishes → final.json)
+  //   4. Touch done flag + notify + deeplink (if enabled)
+  //
+  // Polish (LLM step) is the slow one (~1.5s per utterance × 100 utterances
+  // = 2-3 min for hour-long audio). It MUST happen here in the detached
+  // script — if we did it in the Raycast extension process at view time, it
+  // would die the moment the user dismisses the launcher window.
   const successAlert = notifyOnComplete
     ? `notify "Audio Transcriber" ${shEscape(successMsg)} "Glass"
   open ${shEscape(deeplinkUrl)} >/dev/null 2>&1 || true`
@@ -593,10 +601,21 @@ notify() {
 
 {
   ${shEscape(binary)} transcribe ${shEscape(opts.audioPath)} --output-json ${shEscape(asrOut)} --word-timestamps && \\
-  ${shEscape(binary)} process ${shEscape(opts.audioPath)} --mode offline --output ${shEscape(diarOut)} ${numSpeakersArgs}
+  ${shEscape(binary)} process ${shEscape(opts.audioPath)} --mode offline --output ${shEscape(diarOut)} ${numSpeakersArgs} && \\
+  swift ${shEscape(prepareScript)} \\
+    --asr ${shEscape(asrOut)} \\
+    --diar ${shEscape(diarOut)} \\
+    --output ${shEscape(finalOut)} \\
+    --audio ${shEscape(opts.audioPath)} \\
+    --job-id ${shEscape(id)} \\
+    ${polishFlag}
 } > ${shEscape(logPath)} 2>&1
+PREPARE_STATUS=$?
 
-if [ $? -eq 0 ] && [ -f ${shEscape(asrOut)} ] && [ -f ${shEscape(diarOut)} ]; then
+# prepare.swift exits 0 on full success, 2 on "polish skipped but final
+# written" (older macOS without FoundationModels). Both produce final.json
+# so we treat them as success. Anything else is a real failure.
+if { [ $PREPARE_STATUS -eq 0 ] || [ $PREPARE_STATUS -eq 2 ]; } && [ -f ${shEscape(finalOut)} ]; then
   touch ${shEscape(doneFlag)}
   ${successAlert}
 else
@@ -620,6 +639,7 @@ fi
     jobDir,
     asrOut,
     diarOut,
+    finalOut,
     doneFlag,
     errorFlag,
     logPath,
@@ -638,6 +658,24 @@ export async function loadJobResult(
   job: ParakeetJob,
   onPolishStatus?: (status: string) => void,
 ): Promise<TranscriptResult> {
+  // Preferred path: the detached bg script already ran prepare.swift and
+  // wrote a canonical final.json. Read it — no in-process work, no waiting.
+  // Falls back to jobDir/final.json for jobs whose stored metadata predates
+  // the finalOut field (so older jobs benefit if final.json exists on disk).
+  const finalPath =
+    job.finalOut && fs.existsSync(job.finalOut)
+      ? job.finalOut
+      : path.join(job.jobDir, "final.json");
+  if (fs.existsSync(finalPath)) {
+    const raw = fs.readFileSync(finalPath, "utf8");
+    const data = JSON.parse(raw) as TranscriptResult & { createdAt: string };
+    return { ...data, createdAt: new Date(data.createdAt) };
+  }
+
+  // Backward-compat: a job created before the prepare.swift change won't
+  // have final.json — fall back to building (and optionally polishing) in
+  // this process. Polish in this path can be slow and dies if the user
+  // dismisses Raycast — new jobs avoid it by running everything detached.
   const asrData = JSON.parse(
     fs.readFileSync(job.asrOut, "utf8"),
   ) as FluidTranscriptJSON;

@@ -43,6 +43,7 @@ export interface ParakeetJob {
   jobDir: string;
   asrOut: string;
   diarOut: string;
+  finalOut: string; // canonical TranscriptResult JSON written by prepare.swift
   doneFlag: string;
   errorFlag: string;
   logPath: string;
