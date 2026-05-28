@@ -110,6 +110,108 @@ function mergeConsecutiveSpeakers(utterances: Utterance[]): Utterance[] {
   return merged;
 }
 
+// Build utterances by slicing the model's clean top-level text instead of
+// joining word tokens. FluidAudio's `text` field is the source of truth
+// for spacing/punctuation/casing; `wordTimings` give us per-word time
+// markers we use to find where each speaker segment maps into the text.
+//
+// Words that fall in time gaps between diarization segments (mismatched
+// boundaries between ASR and diarization models) get assigned to the
+// nearest segment by midpoint distance — without this they're silently
+// dropped, which leaves visible word-shaped holes in the transcript.
+function buildUtterances(
+  asrData: FluidTranscriptJSON,
+  diarData: FluidDiarizationJSON,
+): Utterance[] {
+  const segments = [...diarData.segments].sort(
+    (a, b) => a.startTimeSeconds - b.startTimeSeconds,
+  );
+  if (segments.length === 0) return [];
+
+  // Map raw speakerIds (first-seen order) to letters A, B, C…
+  const letters = "ABCDEFGHIJKLMNOPQRSTUVWXYZ";
+  const speakerMap = new Map<string, string>();
+  for (const seg of segments) {
+    if (!speakerMap.has(seg.speakerId)) {
+      speakerMap.set(
+        seg.speakerId,
+        letters[speakerMap.size] ?? seg.speakerId,
+      );
+    }
+  }
+
+  // Find character offset of each word in the top-level text via a greedy
+  // case-insensitive scan. Words that can't be located (rare — only if
+  // text is normalized differently than wordTimings) fall back to a
+  // zero-length marker at the cursor.
+  const wordPositions: Array<{ start: number; end: number }> = [];
+  const lowerText = asrData.text.toLowerCase();
+  let cursor = 0;
+  for (const w of asrData.wordTimings) {
+    const needle = w.word.toLowerCase();
+    const found = lowerText.indexOf(needle, cursor);
+    if (found >= 0) {
+      wordPositions.push({ start: found, end: found + w.word.length });
+      cursor = found + w.word.length;
+    } else {
+      wordPositions.push({ start: cursor, end: cursor });
+    }
+  }
+
+  // Assign each word to a segment. First pass: word's startTime falls
+  // inside the segment's window. Second pass (fallback): nearest segment
+  // by midpoint — catches words that fall in inter-segment gaps.
+  const wordSegIdx: number[] = [];
+  for (const w of asrData.wordTimings) {
+    let idx = segments.findIndex(
+      (s) =>
+        w.startTime >= s.startTimeSeconds && w.startTime < s.endTimeSeconds,
+    );
+    if (idx === -1) {
+      let bestDist = Infinity;
+      for (let i = 0; i < segments.length; i++) {
+        const mid =
+          (segments[i].startTimeSeconds + segments[i].endTimeSeconds) / 2;
+        const d = Math.abs(w.startTime - mid);
+        if (d < bestDist) {
+          bestDist = d;
+          idx = i;
+        }
+      }
+    }
+    wordSegIdx.push(idx);
+  }
+
+  // For each segment, slice asrData.text from the first matched word's
+  // start char to the last matched word's end char. This preserves the
+  // model's spacing and punctuation exactly.
+  const utterances: Utterance[] = [];
+  for (let segIdx = 0; segIdx < segments.length; segIdx++) {
+    const seg = segments[segIdx];
+    let first = -1;
+    let last = -1;
+    for (let i = 0; i < wordSegIdx.length; i++) {
+      if (wordSegIdx[i] === segIdx) {
+        if (first === -1) first = i;
+        last = i;
+      }
+    }
+    if (first === -1) continue;
+    const text = asrData.text
+      .slice(wordPositions[first].start, wordPositions[last].end)
+      .trim();
+    if (text.length === 0) continue;
+    utterances.push({
+      speaker: speakerMap.get(seg.speakerId) ?? seg.speakerId,
+      text,
+      start: Math.round(seg.startTimeSeconds * 1000),
+      end: Math.round(seg.endTimeSeconds * 1000),
+    });
+  }
+
+  return mergeConsecutiveSpeakers(utterances);
+}
+
 // Shape of fluidaudiocli transcribe --output-json <path>
 interface FluidTranscriptJSON {
   text: string;
@@ -216,38 +318,7 @@ export class LocalParakeetBackend implements TranscriptionBackend {
         fs.readFileSync(diarOut, "utf8"),
       ) as FluidDiarizationJSON;
 
-      // Map raw speakerIds (first-seen order) to letters A, B, C…
-      const letters = "ABCDEFGHIJKLMNOPQRSTUVWXYZ";
-      const speakerMap = new Map<string, string>();
-      const sorted = [...diarData.segments].sort(
-        (a, b) => a.startTimeSeconds - b.startTimeSeconds,
-      );
-      for (const seg of sorted) {
-        if (!speakerMap.has(seg.speakerId)) {
-          speakerMap.set(
-            seg.speakerId,
-            letters[speakerMap.size] ?? seg.speakerId,
-          );
-        }
-      }
-
-      // Merge: for each speaker segment, collect words whose startTime falls in that window
-      const utterances: Utterance[] = [];
-      for (const seg of sorted) {
-        const words = asrData.wordTimings.filter(
-          (w) =>
-            w.startTime >= seg.startTimeSeconds &&
-            w.startTime < seg.endTimeSeconds,
-        );
-        if (words.length === 0) continue;
-        utterances.push({
-          speaker: speakerMap.get(seg.speakerId) ?? seg.speakerId,
-          text: words.map((w) => w.word).join(" "),
-          start: Math.round(seg.startTimeSeconds * 1000),
-          end: Math.round(seg.endTimeSeconds * 1000),
-        });
-      }
-
+      const utterances = buildUtterances(asrData, diarData);
       if (utterances.length === 0) {
         throw new Error(
           "No utterances produced. The audio may be silent or too short.",
@@ -257,7 +328,7 @@ export class LocalParakeetBackend implements TranscriptionBackend {
       return {
         id: `local-${Date.now()}`,
         text: asrData.text,
-        utterances: mergeConsecutiveSpeakers(utterances),
+        utterances,
         audioPath: opts.audioPath,
         audioDurationSec: asrData.durationSeconds ?? diarData.durationSeconds,
         createdAt: new Date(),
@@ -456,32 +527,7 @@ export function loadJobResult(job: ParakeetJob): TranscriptResult {
     fs.readFileSync(job.diarOut, "utf8"),
   ) as FluidDiarizationJSON;
 
-  const letters = "ABCDEFGHIJKLMNOPQRSTUVWXYZ";
-  const speakerMap = new Map<string, string>();
-  const sorted = [...diarData.segments].sort(
-    (a, b) => a.startTimeSeconds - b.startTimeSeconds,
-  );
-  for (const seg of sorted) {
-    if (!speakerMap.has(seg.speakerId)) {
-      speakerMap.set(seg.speakerId, letters[speakerMap.size] ?? seg.speakerId);
-    }
-  }
-
-  const utterances: Utterance[] = [];
-  for (const seg of sorted) {
-    const words = asrData.wordTimings.filter(
-      (w) =>
-        w.startTime >= seg.startTimeSeconds && w.startTime < seg.endTimeSeconds,
-    );
-    if (words.length === 0) continue;
-    utterances.push({
-      speaker: speakerMap.get(seg.speakerId) ?? seg.speakerId,
-      text: words.map((w) => w.word).join(" "),
-      start: Math.round(seg.startTimeSeconds * 1000),
-      end: Math.round(seg.endTimeSeconds * 1000),
-    });
-  }
-
+  const utterances = buildUtterances(asrData, diarData);
   if (utterances.length === 0) {
     throw new Error(
       "No utterances produced. The audio may be silent or too short.",
@@ -491,7 +537,7 @@ export function loadJobResult(job: ParakeetJob): TranscriptResult {
   return {
     id: job.id,
     text: asrData.text,
-    utterances: mergeConsecutiveSpeakers(utterances),
+    utterances,
     audioPath: job.audioPath,
     audioDurationSec: asrData.durationSeconds ?? diarData.durationSeconds,
     createdAt: new Date(job.createdAt),
