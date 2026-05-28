@@ -108,14 +108,11 @@ export default function MenuBarStatus() {
   const erroredCount = buckets.errored.length;
   const totalPending = runningCount + readyCount + erroredCount;
 
-  // The menu bar icon should only be visible when there's something to act
-  // on. Returning null suppresses it entirely — the command stays enabled
-  // and keeps polling, it just renders nothing on ticks where the queue is
-  // empty. Also render null while loading on the first tick, so we never
-  // briefly show a loading icon that then disappears.
-  if (isLoading || totalPending === 0) {
-    return null;
-  }
+  // Always render the menu bar icon — a passive indicator that the command
+  // is enabled. When the queue is empty the icon is just the mic glyph; when
+  // jobs are in flight or ready, a count appears alongside. (Earlier version
+  // auto-hid when idle, but that made it impossible to tell "command is on
+  // but nothing pending" from "command isn't enabled".)
 
   // Menu bar title: prioritize "ready/errored" cues over running counts
   // since those are actionable. Keep it short (menu bar real estate is small).

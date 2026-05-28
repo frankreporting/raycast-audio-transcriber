@@ -10,6 +10,8 @@ import {
   Alert,
   confirmAlert,
   openExtensionPreferences,
+  launchCommand,
+  LaunchType,
 } from "@raycast/api";
 import { useEffect, useState } from "react";
 import {
@@ -212,6 +214,17 @@ export default function TranscribeCommand() {
         const jobs = await readJobs();
         jobs.push(job);
         await writeJobs(jobs);
+
+        // Force the menu bar command to refresh immediately so its icon
+        // updates with the new running-job count instead of waiting up
+        // to 60 seconds for the next poll tick. Silently no-ops if the
+        // user hasn't enabled the menu bar command.
+        launchCommand({
+          name: "menu-bar",
+          type: LaunchType.Background,
+        }).catch(() => {
+          // command disabled or not enabled — silent skip
+        });
 
         setFilePaths([]);
         push(
