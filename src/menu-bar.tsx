@@ -14,6 +14,7 @@ import {
 import { useEffect, useState } from "react";
 import { execFile } from "child_process";
 import { promisify } from "util";
+import * as fs from "fs";
 import * as path from "path";
 import { cleanupJob, getJobStatus, isJobStale } from "./api";
 import { listLibraryRecent, getLibraryFolder, LibraryItem } from "./library";
@@ -72,6 +73,12 @@ async function classifyJobs(): Promise<JobBuckets> {
   const surviving: ParakeetJob[] = [];
 
   for (const job of jobs) {
+    // Dead job: dir was wiped externally (manual cleanup, OS cache purge,
+    // etc.) but LocalStorage still has the record. Without this check it
+    // would show as a phantom "running" job since neither flag file exists.
+    if (!fs.existsSync(job.jobDir)) {
+      continue; // drop from surviving — don't show
+    }
     const status = getJobStatus(job);
     if (status === "done") {
       ready.push(job);

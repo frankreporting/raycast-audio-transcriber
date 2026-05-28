@@ -91,6 +91,12 @@ export default function TranscribeCommand() {
         const running: ParakeetJob[] = [];
 
         for (const job of jobs) {
+          // Dead job: dir was wiped externally but LocalStorage still has
+          // the record. Drop it silently rather than letting it appear as
+          // a phantom "running" job (since neither flag file exists).
+          if (!fs.existsSync(job.jobDir)) {
+            continue;
+          }
           const status = getJobStatus(job);
           if (status === "done") {
             done.push(job);
