@@ -422,94 +422,116 @@ if !doPolish {
 #if canImport(FoundationModels)
   import FoundationModels
 
-  let instructions = """
+  let batchInstructions = """
     You polish raw automatic speech recognition transcripts. The user will give you \
-    one utterance per message. Add commas around disfluencies (um, uh, ah, like, you \
-    know, I mean, well, so), em-dashes for self-corrections and false starts (e.g., \
-    "code coding" becomes "code—coding"), missing punctuation, and proper capitalization.
+    a batch of numbered utterances. Polish each one and return them in the same \
+    numbered format.
 
-    CRITICAL: Do NOT add, remove, or change any of the spoken words. Keep them in the \
-    exact same order. Only add punctuation and fix casing.
+    For each utterance, add commas around disfluencies (um, uh, ah, like, you know, \
+    I mean, well, so), em-dashes for self-corrections and false starts (e.g., \
+    "code coding" → "code—coding"), missing punctuation, and proper capitalization.
 
-    Respond with ONLY the polished utterance. No preamble. No explanation. No quotes \
-    around it. No trailing punctuation that wasn't implied by the speech.
+    CRITICAL RULES:
+    1. DO NOT add, remove, or change any spoken words. Keep them in exact order.
+    2. Return EXACTLY one numbered line per input, in the same order.
+    3. Format: "N: polished text" — no preamble, no extra lines, no markdown.
 
-    Examples:
-    Input:  um yeah I think so it was the the door that was open
-    Output: Um, yeah, I think so. It was the—the door that was open.
+    Example input:
+    1: um yeah I think so it was the the door that was open
+    2: code coding is hard you know
+    3: shes coming over tonight cant wait
 
-    Input:  code coding is hard you know
-    Output: Code—coding is hard, you know?
+    Example output:
+    1: Um, yeah, I think so. It was the—the door that was open.
+    2: Code—coding is hard, you know?
+    3: She's coming over tonight. Can't wait.
     """
+
+  // Apply per-utterance validator/merge to a single polish candidate.
+  // Returns the validated string (or nil if even merge couldn't reconcile).
+  @available(macOS 26.0, *)
+  func validateOrMerge(original: String, polished: String) -> String? {
+    if polished.isEmpty { return nil }
+    if wordTokens(original) == wordTokens(polished) { return polished }
+    let merged = mergePolishedPunctuation(original: original, polished: polished)
+    if wordTokens(merged) == wordTokens(original) { return merged }
+    return nil
+  }
+
+  // Send one batch of utterances to the model, parse the numbered response.
+  // Returns array same length as batch — entries are polish candidates as
+  // returned by the model (raw, NOT yet validated), or nil if the model
+  // didn't return a line for that index.
+  @available(macOS 26.0, *)
+  func polishBatch(_ batch: [Utterance]) async -> [String?] {
+    let options = GenerationOptions(temperature: 0.2)
+    let numbered = batch.enumerated()
+      .map { (i, u) in "\(i + 1): \(u.text)" }
+      .joined(separator: "\n")
+    let session = LanguageModelSession(instructions: batchInstructions)
+    var result: [String?] = Array(repeating: nil, count: batch.count)
+    do {
+      let response = try await session.respond(to: numbered, options: options)
+      for line in response.content.split(whereSeparator: \.isNewline) {
+        let lineStr = String(line).trimmingCharacters(in: .whitespaces)
+        guard let colonIdx = lineStr.firstIndex(of: ":") else { continue }
+        let prefix = lineStr[..<colonIdx].trimmingCharacters(in: .whitespaces)
+        guard let num = Int(prefix) else { continue }
+        let idx = num - 1
+        if idx < 0 || idx >= batch.count { continue }
+        let text = String(lineStr[lineStr.index(after: colonIdx)...])
+          .trimmingCharacters(in: .whitespaces)
+        if !text.isEmpty {
+          result[idx] = text
+        }
+      }
+    } catch {
+      writeStderr("Batch polish failed: \(error)\n")
+    }
+    return result
+  }
 
   @available(macOS 26.0, *)
   func polish(_ inputs: [Utterance]) async -> [Utterance] {
-    // CRITICAL: create a fresh LanguageModelSession per utterance instead
-    // of reusing one across the whole transcript. Apple's on-device 3B
-    // model degrades as the session's conversation history grows — after
-    // ~20 messages of context it starts ignoring the polish instructions
-    // and returning the input unchanged. Fresh sessions keep every call's
-    // context to just (system instructions + single utterance), which
-    // gives consistent polish quality across the full transcript.
+    // Batched polish: send N utterances per model call instead of one. With
+    // ~13s per call (session init + inference), batching cuts total time
+    // dramatically. Batch size 5 keeps each call small enough that:
+    //   - The model doesn't drift on format compliance
+    //   - One bad utterance in a batch doesn't tank the whole batch (per-
+    //     utterance validator/merge still applies)
+    //   - Total time scales roughly with batches-needed × per-call cost
     //
-    // Low temperature (0.2) keeps output deterministic and reduces the
-    // chance of the model "creatively" rewriting or adding words.
-    //
-    // Surrounding-utterance context goes in the instructions, not the
-    // user message — model sees prev/next for rhythm but the polish
-    // target is unambiguous (the single user message).
-    let options = GenerationOptions(temperature: 0.2)
+    // For 103 utterances at batch=5 → 21 calls × ~13s ≈ 4.5 min, down
+    // from 103 × 13s ≈ 22 min unbatched.
+    let batchSize = 5
     var out = inputs
-    let total = inputs.count
-    for (idx, u) in inputs.enumerated() {
-      writeStderr("PROGRESS \(idx + 1)/\(total)\n")
-      let original = u.text
-      if original.trimmingCharacters(in: .whitespaces).isEmpty { continue }
-
-      var contextualInstructions = instructions
-      let prev = idx > 0 ? inputs[idx - 1].text : nil
-      let next = idx < inputs.count - 1 ? inputs[idx + 1].text : nil
-      if prev != nil || next != nil {
-        contextualInstructions += "\n\nFor context, here are the surrounding "
-        contextualInstructions += "utterances. DO NOT polish or include them in "
-        contextualInstructions += "your response — they are only to help you "
-        contextualInstructions += "understand the conversation rhythm."
-        if let prev = prev {
-          contextualInstructions += "\n\nPrevious utterance: \(prev)"
+    var idx = 0
+    while idx < inputs.count {
+      let end = min(idx + batchSize, inputs.count)
+      let batch = Array(inputs[idx..<end])
+      let candidates = await polishBatch(batch)
+      for (i, candidate) in candidates.enumerated() {
+        let utteranceIdx = idx + i
+        guard let c = candidate else {
+          writeStderr("Polish: no batched response for utterance \(utteranceIdx)\n")
+          continue
         }
-        if let next = next {
-          contextualInstructions += "\n\nNext utterance: \(next)"
-        }
-      }
-
-      let session = LanguageModelSession(instructions: contextualInstructions)
-      do {
-        let response = try await session.respond(to: original, options: options)
-        let candidate = response.content.trimmingCharacters(in: .whitespacesAndNewlines)
-        if candidate.isEmpty { continue }
-
-        // Word-preservation check: polish must contain exactly the same
-        // word sequence as the original (only punctuation/casing may
-        // differ). If the model dropped/hallucinated/reordered words,
-        // attempt a merge that splices missing original words back in
-        // and drops hallucinated additions. Preserves polish's
-        // punctuation/casing where it lines up; falls back to original
-        // text where it doesn't.
-        if wordTokens(original) == wordTokens(candidate) {
-          out[idx].text = candidate
-        } else {
-          let merged = mergePolishedPunctuation(original: original, polished: candidate)
-          // Sanity-check the merge: word sequence must match the original.
-          if wordTokens(merged) == wordTokens(original) {
-            writeStderr("Polish merged (word mismatch recovered) on utterance \(idx)\n")
-            out[idx].text = merged
-          } else {
-            writeStderr("Polish rejected (merge failed) on utterance \(idx)\n")
+        if let validated = validateOrMerge(original: batch[i].text, polished: c) {
+          if validated != batch[i].text {
+            // Only log when we actually changed something
+            if wordTokens(batch[i].text) != wordTokens(c) {
+              writeStderr(
+                "Polish merged (word mismatch recovered) on utterance \(utteranceIdx)\n"
+              )
+            }
           }
+          out[utteranceIdx].text = validated
+        } else {
+          writeStderr("Polish rejected (merge failed) on utterance \(utteranceIdx)\n")
         }
-      } catch {
-        writeStderr("Polish failed on utterance \(idx): \(error)\n")
       }
+      idx = end
+      writeStderr("PROGRESS \(idx)/\(inputs.count)\n")
     }
     return out
   }
