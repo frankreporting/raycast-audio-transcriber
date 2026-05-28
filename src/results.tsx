@@ -1,10 +1,24 @@
-import { Detail, ActionPanel, Action, showToast, Toast, Clipboard, useNavigation } from "@raycast/api";
+import {
+  Detail,
+  ActionPanel,
+  Action,
+  showToast,
+  Toast,
+  Clipboard,
+  useNavigation,
+} from "@raycast/api";
 import { useState, useMemo } from "react";
 import * as fs from "fs";
 import * as path from "path";
-import { formatAsTxt, formatAsMarkdown, formatAsJson, getExtension } from "./formatters";
+import {
+  formatAsTxt,
+  formatAsMarkdown,
+  formatAsJson,
+  getExtension,
+} from "./formatters";
 import { OutputFormat, TranscriptResult, SpeakerNameMap } from "./types";
 import { RenameSpeakersForm } from "./rename-speakers";
+import { getLibraryFolder } from "./library";
 
 interface Props {
   result: TranscriptResult;
@@ -29,14 +43,22 @@ export function ResultsView({ result, initialFormat }: Props) {
   }, [formatted, format]);
 
   function defaultSavePath(): string {
-    const dir = path.dirname(result.audioPath);
-    const base = path.basename(result.audioPath, path.extname(result.audioPath));
-    return path.join(dir, `${base}.transcript.${getExtension(format)}`);
+    const base = path.basename(
+      result.audioPath,
+      path.extname(result.audioPath),
+    );
+    const filename = `${base}.transcript.${getExtension(format)}`;
+    const folder = getLibraryFolder();
+    const dir = folder ?? path.dirname(result.audioPath);
+    return path.join(dir, filename);
   }
 
   async function handleCopy() {
     await Clipboard.copy(formatted);
-    await showToast({ style: Toast.Style.Success, title: "Copied to clipboard" });
+    await showToast({
+      style: Toast.Style.Success,
+      title: "Copied to clipboard",
+    });
   }
 
   async function handlePaste() {
@@ -46,11 +68,20 @@ export function ResultsView({ result, initialFormat }: Props) {
   async function handleSave() {
     const savePath = defaultSavePath();
     try {
+      fs.mkdirSync(path.dirname(savePath), { recursive: true });
       fs.writeFileSync(savePath, formatted, "utf8");
-      await showToast({ style: Toast.Style.Success, title: "Saved", message: savePath });
+      await showToast({
+        style: Toast.Style.Success,
+        title: "Saved",
+        message: savePath,
+      });
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);
-      await showToast({ style: Toast.Style.Failure, title: "Save failed", message });
+      await showToast({
+        style: Toast.Style.Failure,
+        title: "Save failed",
+        message,
+      });
     }
   }
 
@@ -59,6 +90,11 @@ export function ResultsView({ result, initialFormat }: Props) {
     result.utterances.forEach((u) => set.add(u.speaker));
     return Array.from(set).sort();
   }, [result]);
+
+  // When a library folder is set, transcripts auto-save there (canonical JSON +
+  // a sidecar in the default format). The manual save action would be redundant
+  // and confusing, so it only appears when no library folder is configured.
+  const showManualSave = !getLibraryFolder();
 
   return (
     <Detail
@@ -77,10 +113,17 @@ export function ResultsView({ result, initialFormat }: Props) {
               onAction={handlePaste}
               shortcut={{ modifiers: ["cmd"], key: "v" }}
             />
-            <Action
-              title="Save Next to Source File"
-              onAction={handleSave}
-              shortcut={{ modifiers: ["cmd"], key: "s" }}
+            {showManualSave && (
+              <Action
+                title="Save Next to Source File"
+                onAction={handleSave}
+                shortcut={{ modifiers: ["cmd"], key: "s" }}
+              />
+            )}
+            <Action.ShowInFinder
+              path={result.audioPath}
+              title="Reveal Source File in Finder"
+              shortcut={{ modifiers: ["cmd", "shift"], key: "r" }}
             />
           </ActionPanel.Section>
           <ActionPanel.Section title="Modify">

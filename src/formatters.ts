@@ -16,11 +16,19 @@ function speakerLabel(speaker: string, nameMap?: SpeakerNameMap): string {
   return `Speaker ${speaker}`;
 }
 
-export function formatAsTxt(result: TranscriptResult, nameMap?: SpeakerNameMap): string {
-  return result.utterances.map((u) => `${speakerLabel(u.speaker, nameMap)}: ${u.text}`).join("\n\n");
+export function formatAsTxt(
+  result: TranscriptResult,
+  nameMap?: SpeakerNameMap,
+): string {
+  return result.utterances
+    .map((u) => `${speakerLabel(u.speaker, nameMap)}: ${u.text}`)
+    .join("\n\n");
 }
 
-export function formatAsMarkdown(result: TranscriptResult, nameMap?: SpeakerNameMap): string {
+export function formatAsMarkdown(
+  result: TranscriptResult,
+  nameMap?: SpeakerNameMap,
+): string {
   const header = [
     `# Transcript`,
     ``,
@@ -43,7 +51,10 @@ export function formatAsMarkdown(result: TranscriptResult, nameMap?: SpeakerName
   return header + body;
 }
 
-export function formatAsJson(result: TranscriptResult, nameMap?: SpeakerNameMap): string {
+export function formatAsJson(
+  result: TranscriptResult,
+  nameMap?: SpeakerNameMap,
+): string {
   const remapped = {
     ...result,
     createdAt: result.createdAt.toISOString(),

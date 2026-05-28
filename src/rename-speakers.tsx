@@ -10,7 +10,9 @@ interface Props {
 
 export function RenameSpeakersForm({ speakers, currentMap, onSubmit }: Props) {
   const { pop } = useNavigation();
-  const [values, setValues] = useState<SpeakerNameMap>(() => ({ ...currentMap }));
+  const [values, setValues] = useState<SpeakerNameMap>(() => ({
+    ...currentMap,
+  }));
 
   function handleChange(speaker: string, value: string) {
     setValues((prev) => ({ ...prev, [speaker]: value }));

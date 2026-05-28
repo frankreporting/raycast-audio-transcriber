@@ -1,11 +1,17 @@
-import { execFile } from "child_process";
+import { execFile, spawn } from "child_process";
 import { promisify } from "util";
 import * as fs from "fs";
 import * as os from "os";
 import * as path from "path";
 import { AssemblyAI } from "assemblyai";
 import { getPreferenceValues } from "@raycast/api";
-import { Preferences, TranscriptResult, Utterance } from "./types";
+import {
+  ParakeetJob,
+  ParakeetJobStatus,
+  Preferences,
+  TranscriptResult,
+  Utterance,
+} from "./types";
 
 const execFileAsync = promisify(execFile);
 
@@ -27,7 +33,9 @@ export interface TranscriptionBackend {
 function getAssemblyAIClient(): AssemblyAI {
   const { apiKey } = getPreferenceValues<Preferences>();
   if (!apiKey) {
-    throw new Error("AssemblyAI API key is not set. Add it in Raycast → Preferences → Extensions → Audio Transcriber.");
+    throw new Error(
+      "AssemblyAI API key is not set. Add it in Raycast → Preferences → Extensions → Audio Transcriber.",
+    );
   }
   return new AssemblyAI({ apiKey });
 }
@@ -44,18 +52,24 @@ export class AssemblyAIBackend implements TranscriptionBackend {
       audio: opts.audioPath,
       speech_models: ["universal-3-pro", "universal-2"],
       speaker_labels: true,
-      ...(opts.speakersExpected ? { speakers_expected: opts.speakersExpected } : {}),
+      ...(opts.speakersExpected
+        ? { speakers_expected: opts.speakersExpected }
+        : {}),
       ...(opts.keytermsPrompt && opts.keytermsPrompt.length > 0
         ? { keyterms_prompt: opts.keytermsPrompt }
         : {}),
     } as Parameters<typeof client.transcripts.transcribe>[0]);
 
     if (transcript.status === "error") {
-      throw new Error(transcript.error || "AssemblyAI returned an error status");
+      throw new Error(
+        transcript.error || "AssemblyAI returned an error status",
+      );
     }
 
     if (!transcript.utterances || transcript.utterances.length === 0) {
-      throw new Error("No utterances returned. The audio may be silent or too short.");
+      throw new Error(
+        "No utterances returned. The audio may be silent or too short.",
+      );
     }
 
     const utterances: Utterance[] = transcript.utterances.map((u) => ({
@@ -78,6 +92,24 @@ export class AssemblyAIBackend implements TranscriptionBackend {
 
 // --- Local Parakeet backend ---
 
+// Parakeet's diarizer emits a separate segment whenever there's a pause,
+// so a single speaker's monologue often arrives as many short segments.
+// Collapse consecutive segments by the same speaker into one utterance:
+// timestamps span the full range, text is joined with a space.
+function mergeConsecutiveSpeakers(utterances: Utterance[]): Utterance[] {
+  const merged: Utterance[] = [];
+  for (const u of utterances) {
+    const last = merged[merged.length - 1];
+    if (last && last.speaker === u.speaker) {
+      last.text = `${last.text} ${u.text}`.trim();
+      last.end = u.end;
+    } else {
+      merged.push({ ...u });
+    }
+  }
+  return merged;
+}
+
 // Shape of fluidaudiocli transcribe --output-json <path>
 interface FluidTranscriptJSON {
   text: string;
@@ -85,7 +117,7 @@ interface FluidTranscriptJSON {
   wordTimings: Array<{
     word: string;
     startTime: number; // seconds
-    endTime: number;   // seconds
+    endTime: number; // seconds
   }>;
 }
 
@@ -107,7 +139,7 @@ export class LocalParakeetBackend implements TranscriptionBackend {
     const binary = parakeetBinaryPath?.trim();
     if (!binary) {
       throw new Error(
-        "Parakeet binary path is not set. Build fluidaudiocli and set its path in Raycast → Preferences → Extensions → Audio Transcriber."
+        "Parakeet binary path is not set. Build fluidaudiocli and set its path in Raycast → Preferences → Extensions → Audio Transcriber.",
       );
     }
 
@@ -125,46 +157,77 @@ export class LocalParakeetBackend implements TranscriptionBackend {
       } catch (err) {
         const stderr = (err as { stderr?: string }).stderr?.slice(-1000) ?? "";
         const msg = err instanceof Error ? err.message : String(err);
-        throw new Error(`Parakeet ${stepName} failed: ${msg}${stderr ? `\n\n${stderr}` : ""}`);
+        throw new Error(
+          `Parakeet ${stepName} failed: ${msg}${stderr ? `\n\n${stderr}` : ""}`,
+        );
       }
     };
 
     try {
-      opts.onStatusUpdate?.("Transcribing locally… (first run downloads models, may take a few minutes)");
+      opts.onStatusUpdate?.(
+        "Transcribing locally… (first run downloads models, may take a few minutes)",
+      );
       await runStep(
-        ["transcribe", opts.audioPath, "--output-json", asrOut, "--word-timestamps"],
-        "transcription"
+        [
+          "transcribe",
+          opts.audioPath,
+          "--output-json",
+          asrOut,
+          "--word-timestamps",
+        ],
+        "transcription",
       );
 
       if (!fs.existsSync(asrOut)) {
-        throw new Error("Parakeet transcription produced no output. Check the binary path in preferences.");
+        throw new Error(
+          "Parakeet transcription produced no output. Check the binary path in preferences.",
+        );
       }
 
       opts.onStatusUpdate?.("Identifying speakers…");
+      // Offline mode runs VBx clustering over the whole audio at once —
+      // significantly more accurate than streaming, which has to commit to
+      // speaker assignments incrementally without full context. With
+      // --num-speakers set, it's a hard constraint (vs. streaming's
+      // --num-clusters, which is only a hint).
       await runStep(
         [
-          "process", opts.audioPath,
-          "--mode", "streaming",
-          "--output", diarOut,
-          ...(opts.speakersExpected ? ["--num-clusters", String(opts.speakersExpected)] : []),
+          "process",
+          opts.audioPath,
+          "--mode",
+          "offline",
+          "--output",
+          diarOut,
+          ...(opts.speakersExpected
+            ? ["--num-speakers", String(opts.speakersExpected)]
+            : []),
         ],
-        "diarization"
+        "diarization",
       );
 
       if (!fs.existsSync(diarOut)) {
         throw new Error("Parakeet diarization produced no output.");
       }
 
-      const asrData = JSON.parse(fs.readFileSync(asrOut, "utf8")) as FluidTranscriptJSON;
-      const diarData = JSON.parse(fs.readFileSync(diarOut, "utf8")) as FluidDiarizationJSON;
+      const asrData = JSON.parse(
+        fs.readFileSync(asrOut, "utf8"),
+      ) as FluidTranscriptJSON;
+      const diarData = JSON.parse(
+        fs.readFileSync(diarOut, "utf8"),
+      ) as FluidDiarizationJSON;
 
       // Map raw speakerIds (first-seen order) to letters A, B, C…
       const letters = "ABCDEFGHIJKLMNOPQRSTUVWXYZ";
       const speakerMap = new Map<string, string>();
-      const sorted = [...diarData.segments].sort((a, b) => a.startTimeSeconds - b.startTimeSeconds);
+      const sorted = [...diarData.segments].sort(
+        (a, b) => a.startTimeSeconds - b.startTimeSeconds,
+      );
       for (const seg of sorted) {
         if (!speakerMap.has(seg.speakerId)) {
-          speakerMap.set(seg.speakerId, letters[speakerMap.size] ?? seg.speakerId);
+          speakerMap.set(
+            seg.speakerId,
+            letters[speakerMap.size] ?? seg.speakerId,
+          );
         }
       }
 
@@ -172,7 +235,9 @@ export class LocalParakeetBackend implements TranscriptionBackend {
       const utterances: Utterance[] = [];
       for (const seg of sorted) {
         const words = asrData.wordTimings.filter(
-          (w) => w.startTime >= seg.startTimeSeconds && w.startTime < seg.endTimeSeconds
+          (w) =>
+            w.startTime >= seg.startTimeSeconds &&
+            w.startTime < seg.endTimeSeconds,
         );
         if (words.length === 0) continue;
         utterances.push({
@@ -184,20 +249,26 @@ export class LocalParakeetBackend implements TranscriptionBackend {
       }
 
       if (utterances.length === 0) {
-        throw new Error("No utterances produced. The audio may be silent or too short.");
+        throw new Error(
+          "No utterances produced. The audio may be silent or too short.",
+        );
       }
 
       return {
         id: `local-${Date.now()}`,
         text: asrData.text,
-        utterances,
+        utterances: mergeConsecutiveSpeakers(utterances),
         audioPath: opts.audioPath,
         audioDurationSec: asrData.durationSeconds ?? diarData.durationSeconds,
         createdAt: new Date(),
       };
     } finally {
       for (const f of [asrOut, diarOut]) {
-        try { fs.unlinkSync(f); } catch { /* best-effort cleanup */ }
+        try {
+          fs.unlinkSync(f);
+        } catch {
+          /* best-effort cleanup */
+        }
       }
     }
   }
@@ -214,17 +285,240 @@ export function getBackend(): TranscriptionBackend {
   return new AssemblyAIBackend();
 }
 
-export async function transcribeFile(opts: TranscribeOptions): Promise<TranscriptResult> {
+export async function transcribeFile(
+  opts: TranscribeOptions,
+): Promise<TranscriptResult> {
   const { transcriptionBackend } = getPreferenceValues<Preferences>();
 
   if (transcriptionBackend === "parakeet-fallback") {
     try {
       return await new LocalParakeetBackend().transcribe(opts);
     } catch {
-      opts.onStatusUpdate?.("Local Parakeet failed, falling back to AssemblyAI...");
+      opts.onStatusUpdate?.(
+        "Local Parakeet failed, falling back to AssemblyAI...",
+      );
       return await new AssemblyAIBackend().transcribe(opts);
     }
   }
 
   return getBackend().transcribe(opts);
+}
+
+// --- Background Parakeet jobs ---
+//
+// Raycast kills the extension process the moment the view is dismissed, which
+// kills any child processes in its process group. To survive that, we write a
+// shell script and spawn it detached (its own session via setsid-equivalent).
+// fluidaudiocli runs to completion regardless, and we fire an osascript
+// notification on done/error so the user knows to come back.
+
+function shEscape(s: string): string {
+  return `'${s.replace(/'/g, "'\\''")}'`;
+}
+
+function getJobsRootDir(): string {
+  const dir = path.join(
+    os.homedir(),
+    "Library",
+    "Caches",
+    "raycast-transcribe",
+    "jobs",
+  );
+  fs.mkdirSync(dir, { recursive: true });
+  return dir;
+}
+
+export function startParakeetJob(opts: TranscribeOptions): ParakeetJob {
+  const { parakeetBinaryPath, notifyOnComplete } =
+    getPreferenceValues<Preferences>();
+  const binary = parakeetBinaryPath?.trim();
+  if (!binary) {
+    throw new Error(
+      "Parakeet binary path is not set. Build fluidaudiocli and set its path in Raycast → Preferences → Extensions → Audio Transcriber.",
+    );
+  }
+  if (!fs.existsSync(binary)) {
+    throw new Error(`Parakeet binary not found at: ${binary}`);
+  }
+
+  const id = `job-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+  const jobDir = path.join(getJobsRootDir(), id);
+  fs.mkdirSync(jobDir, { recursive: true });
+
+  const asrOut = path.join(jobDir, "asr.json");
+  const diarOut = path.join(jobDir, "diar.json");
+  const doneFlag = path.join(jobDir, "done");
+  const errorFlag = path.join(jobDir, "error");
+  const logPath = path.join(jobDir, "run.log");
+  const scriptPath = path.join(jobDir, "run.sh");
+
+  // Offline mode runs VBx clustering with full audio context — much more
+  // accurate than streaming, and --num-speakers is a hard constraint when set
+  // (streaming's --num-clusters is only a hint).
+  const numSpeakersArgs = opts.speakersExpected
+    ? `--num-speakers ${shEscape(String(opts.speakersExpected))}`
+    : "";
+
+  // Strip double quotes from the basename — osascript embeds it in a "..."
+  // string literal where unescaped quotes would break the AppleScript.
+  const fileBasename = path.basename(opts.audioPath).replace(/"/g, "");
+  const successMsg = `Transcription of ${fileBasename} is ready. Click to view in Raycast.`;
+  const failureMsg = `Transcription of ${fileBasename} failed. Click to view error in Raycast.`;
+  const deeplinkUrl =
+    "raycast://extensions/brianfrank/audio-transcriber-for-raycast/transcribe";
+
+  // The script:
+  //   1. Adds Homebrew bin dirs to PATH so terminal-notifier (typically in
+  //      /opt/homebrew/bin or /usr/local/bin) is reachable.
+  //   2. Defines a `notify` helper that prefers terminal-notifier (Raycast
+  //      icon + clickable) and falls back to osascript (Script Editor icon,
+  //      no click action) if terminal-notifier isn't installed.
+  //   3. Runs the two fluidaudiocli steps with output captured to a log file.
+  //   4. Writes a done/error flag. If notifyOnComplete is enabled, fires a
+  //      notification and deeplinks back into Raycast. Otherwise completes
+  //      silently — the user checks Review Transcriptions when ready.
+  // The whole thing runs detached so it survives Raycast death.
+  const successAlert = notifyOnComplete
+    ? `notify "Audio Transcriber" ${shEscape(successMsg)} "Glass"
+  open ${shEscape(deeplinkUrl)} >/dev/null 2>&1 || true`
+    : "";
+  const failureAlert = notifyOnComplete
+    ? `notify "Audio Transcriber" ${shEscape(failureMsg)} "Basso"
+  open ${shEscape(deeplinkUrl)} >/dev/null 2>&1 || true`
+    : "";
+
+  const script = `#!/bin/sh
+export PATH="/opt/homebrew/bin:/usr/local/bin:$PATH"
+
+notify() {
+  # $1 = title, $2 = message, $3 = sound name
+  if command -v terminal-notifier >/dev/null 2>&1; then
+    terminal-notifier \\
+      -sender com.raycast.macos \\
+      -title "$1" \\
+      -message "$2" \\
+      -sound "$3" \\
+      -open ${shEscape(deeplinkUrl)} \\
+      >/dev/null 2>&1 || true
+  else
+    osascript -e "display notification \\"$2\\" with title \\"$1\\" sound name \\"$3\\"" >/dev/null 2>&1 || true
+  fi
+}
+
+{
+  ${shEscape(binary)} transcribe ${shEscape(opts.audioPath)} --output-json ${shEscape(asrOut)} --word-timestamps && \\
+  ${shEscape(binary)} process ${shEscape(opts.audioPath)} --mode offline --output ${shEscape(diarOut)} ${numSpeakersArgs}
+} > ${shEscape(logPath)} 2>&1
+
+if [ $? -eq 0 ] && [ -f ${shEscape(asrOut)} ] && [ -f ${shEscape(diarOut)} ]; then
+  touch ${shEscape(doneFlag)}
+  ${successAlert}
+else
+  touch ${shEscape(errorFlag)}
+  ${failureAlert}
+fi
+`;
+
+  fs.writeFileSync(scriptPath, script, { mode: 0o755 });
+
+  const child = spawn("/bin/sh", [scriptPath], {
+    detached: true,
+    stdio: "ignore",
+  });
+  // Disown so the parent (Raycast extension) doesn't wait on us.
+  child.unref();
+
+  return {
+    id,
+    audioPath: opts.audioPath,
+    jobDir,
+    asrOut,
+    diarOut,
+    doneFlag,
+    errorFlag,
+    logPath,
+    speakersExpected: opts.speakersExpected,
+    createdAt: Date.now(),
+  };
+}
+
+export function getJobStatus(job: ParakeetJob): ParakeetJobStatus {
+  if (fs.existsSync(job.doneFlag)) return "done";
+  if (fs.existsSync(job.errorFlag)) return "error";
+  return "running";
+}
+
+export function loadJobResult(job: ParakeetJob): TranscriptResult {
+  const asrData = JSON.parse(
+    fs.readFileSync(job.asrOut, "utf8"),
+  ) as FluidTranscriptJSON;
+  const diarData = JSON.parse(
+    fs.readFileSync(job.diarOut, "utf8"),
+  ) as FluidDiarizationJSON;
+
+  const letters = "ABCDEFGHIJKLMNOPQRSTUVWXYZ";
+  const speakerMap = new Map<string, string>();
+  const sorted = [...diarData.segments].sort(
+    (a, b) => a.startTimeSeconds - b.startTimeSeconds,
+  );
+  for (const seg of sorted) {
+    if (!speakerMap.has(seg.speakerId)) {
+      speakerMap.set(seg.speakerId, letters[speakerMap.size] ?? seg.speakerId);
+    }
+  }
+
+  const utterances: Utterance[] = [];
+  for (const seg of sorted) {
+    const words = asrData.wordTimings.filter(
+      (w) =>
+        w.startTime >= seg.startTimeSeconds && w.startTime < seg.endTimeSeconds,
+    );
+    if (words.length === 0) continue;
+    utterances.push({
+      speaker: speakerMap.get(seg.speakerId) ?? seg.speakerId,
+      text: words.map((w) => w.word).join(" "),
+      start: Math.round(seg.startTimeSeconds * 1000),
+      end: Math.round(seg.endTimeSeconds * 1000),
+    });
+  }
+
+  if (utterances.length === 0) {
+    throw new Error(
+      "No utterances produced. The audio may be silent or too short.",
+    );
+  }
+
+  return {
+    id: job.id,
+    text: asrData.text,
+    utterances: mergeConsecutiveSpeakers(utterances),
+    audioPath: job.audioPath,
+    audioDurationSec: asrData.durationSeconds ?? diarData.durationSeconds,
+    createdAt: new Date(job.createdAt),
+  };
+}
+
+export function loadJobErrorLog(job: ParakeetJob): string {
+  try {
+    const log = fs.readFileSync(job.logPath, "utf8").trim();
+    return log.length > 0 ? log.slice(-2000) : "No error output captured.";
+  } catch {
+    return "No log file available.";
+  }
+}
+
+export function cleanupJob(job: ParakeetJob): void {
+  try {
+    fs.rmSync(job.jobDir, { recursive: true, force: true });
+  } catch {
+    // best-effort
+  }
+}
+
+// A job that's been "running" for >2 hours has almost certainly crashed
+// (longest realistic transcription on M-series is <10 min for an hour of audio).
+const STALE_THRESHOLD_MS = 2 * 60 * 60 * 1000;
+
+export function isJobStale(job: ParakeetJob): boolean {
+  return Date.now() - job.createdAt > STALE_THRESHOLD_MS;
 }

@@ -1,6 +1,9 @@
 export type OutputFormat = "txt" | "markdown" | "json";
 
-export type TranscriptionBackendPref = "assemblyai" | "parakeet" | "parakeet-fallback";
+export type TranscriptionBackendPref =
+  | "assemblyai"
+  | "parakeet"
+  | "parakeet-fallback";
 
 export interface Preferences {
   apiKey: string;
@@ -8,6 +11,8 @@ export interface Preferences {
   defaultKeyTerms: string;
   transcriptionBackend: TranscriptionBackendPref;
   parakeetBinaryPath: string;
+  transcriptsFolder: string;
+  notifyOnComplete: boolean;
 }
 
 export interface Utterance {
@@ -28,3 +33,20 @@ export interface TranscriptResult {
 
 // Maps "A" -> "Nickie", "B" -> "Christina", etc.
 export type SpeakerNameMap = Record<string, string>;
+
+// A detached Parakeet transcription job — survives Raycast extension death,
+// rehydrated on the next form mount by checking flag files in jobDir.
+export interface ParakeetJob {
+  id: string;
+  audioPath: string;
+  jobDir: string;
+  asrOut: string;
+  diarOut: string;
+  doneFlag: string;
+  errorFlag: string;
+  logPath: string;
+  speakersExpected?: number;
+  createdAt: number; // epoch ms
+}
+
+export type ParakeetJobStatus = "running" | "done" | "error";

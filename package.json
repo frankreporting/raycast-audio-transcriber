@@ -13,6 +13,19 @@
       "title": "Transcribe",
       "description": "Transcribe a local audio or video file with speaker diarization",
       "mode": "view"
+    },
+    {
+      "name": "transcriptions",
+      "title": "Review Transcriptions",
+      "description": "Browse, re-export, and manage past transcripts saved to your library folder",
+      "mode": "view"
+    },
+    {
+      "name": "menu-bar",
+      "title": "Transcription Status",
+      "description": "Menu bar indicator showing running background jobs and recent transcripts. Polls once per minute.",
+      "mode": "menu-bar",
+      "interval": "1m"
     }
   ],
   "preferences": [
@@ -52,7 +65,7 @@
       "required": false,
       "default": "assemblyai",
       "data": [
-        { "title": "AssemblyAI (cloud)", "value": "assemblyai" },
+        { "title": "AssemblyAI (cloud, paid)", "value": "assemblyai" },
         { "title": "Parakeet (local, Silicon only)", "value": "parakeet" },
         { "title": "Parakeet w/ AssemblyAI fallback", "value": "parakeet-fallback" }
       ]
@@ -64,6 +77,23 @@
       "type": "textfield",
       "required": false,
       "default": ""
+    },
+    {
+      "name": "transcriptsFolder",
+      "title": "Transcripts library folder",
+      "description": "Folder where transcripts get saved. When set, every successful transcription auto-saves a JSON file here and the Transcriptions command lists them. Leave blank to save next to the source audio file (no library).",
+      "type": "directory",
+      "required": false,
+      "default": ""
+    },
+    {
+      "name": "notifyOnComplete",
+      "title": "Alert when background transcription completes",
+      "label": "Show notification and auto-open Raycast",
+      "description": "Off by default — background jobs complete silently and you check Review Transcriptions when you're ready. Turn on to get a macOS notification (via terminal-notifier if installed, else osascript) plus Raycast auto-opens to the result. See README for terminal-notifier install.",
+      "type": "checkbox",
+      "required": false,
+      "default": false
     }
   ],
   "dependencies": {
