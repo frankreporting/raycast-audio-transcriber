@@ -21,6 +21,102 @@ func wordCount(_ s: String) -> Int {
   return s.split(whereSeparator: { $0.isWhitespace }).count
 }
 
+// Extract a normalized word sequence: lowercase, letters and digits only.
+func wordTokens(_ s: String) -> [String] {
+  var tokens: [String] = []
+  var current = ""
+  for scalar in s.lowercased().unicodeScalars {
+    let c = Character(scalar)
+    if c.isLetter || c.isNumber {
+      current.append(c)
+    } else if !current.isEmpty {
+      tokens.append(current)
+      current = ""
+    }
+  }
+  if !current.isEmpty { tokens.append(current) }
+  return tokens
+}
+
+struct OrigWord {
+  let token: String
+  let surface: String
+}
+
+func extractOriginalWords(_ s: String) -> [OrigWord] {
+  var out: [OrigWord] = []
+  var surface = ""
+  for c in s {
+    if c.isLetter || c.isNumber || c == "'" {
+      surface.append(c)
+    } else if !surface.isEmpty {
+      let tok = wordTokens(surface).first ?? ""
+      out.append(OrigWord(token: tok, surface: surface))
+      surface = ""
+    }
+  }
+  if !surface.isEmpty {
+    let tok = wordTokens(surface).first ?? ""
+    out.append(OrigWord(token: tok, surface: surface))
+  }
+  return out
+}
+
+// Walk through polished, accepting words that line up with the next
+// original word (small lookahead splices in any words polish dropped),
+// dropping polish words that don't match any nearby original word
+// (hallucinations). Keeps polish's punctuation/casing where possible.
+func mergePolishedPunctuation(original: String, polished: String) -> String {
+  let originalWords = extractOriginalWords(original)
+  if originalWords.isEmpty { return polished }
+  let lookahead = 4
+  var result = ""
+  var origIdx = 0
+  var i = polished.startIndex
+  while i < polished.endIndex {
+    let c = polished[i]
+    if c.isLetter || c.isNumber {
+      let wordStart = i
+      while i < polished.endIndex,
+        polished[i].isLetter || polished[i].isNumber || polished[i] == "'"
+      {
+        i = polished.index(after: i)
+      }
+      let polishWord = String(polished[wordStart..<i])
+      let polishToken = wordTokens(polishWord).first ?? ""
+      var matchedAt = -1
+      let maxLookahead = min(lookahead, originalWords.count - origIdx)
+      for k in 0..<maxLookahead {
+        if originalWords[origIdx + k].token == polishToken {
+          matchedAt = k
+          break
+        }
+      }
+      if matchedAt >= 0 {
+        for k in 0..<matchedAt {
+          if !result.isEmpty, let lastChar = result.last, !lastChar.isWhitespace {
+            result += " "
+          }
+          result += originalWords[origIdx + k].surface
+        }
+        result += polishWord
+        origIdx += matchedAt + 1
+      }
+    } else {
+      result.append(c)
+      i = polished.index(after: i)
+    }
+  }
+  while origIdx < originalWords.count {
+    if !result.isEmpty, let lastChar = result.last, !lastChar.isWhitespace {
+      result += " "
+    }
+    result += originalWords[origIdx].surface
+    origIdx += 1
+  }
+  return result
+}
+
 func writeStderr(_ s: String) {
   FileHandle.standardError.write(s.data(using: .utf8) ?? Data())
 }
@@ -64,11 +160,12 @@ guard let payload = try? JSONDecoder().decode(InPayload.self, from: inputData) e
       return
     }
 
-    // One call per utterance. Per-utterance calls are clearer for the model
-    // than batched numbered lists (small models drift on format compliance)
-    // and the per-call overhead on Apple FMM is small. Total time for 50
-    // utterances is typically under 30 seconds on Apple Silicon.
-    let session = LanguageModelSession(instructions: instructions)
+    // One call per utterance AND a fresh session per utterance. Apple's
+    // on-device 3B model degrades as session context grows — after ~20
+    // messages it starts ignoring polish instructions and returning the
+    // input unchanged. Fresh sessions keep each call's context to just
+    // (system instructions + one utterance), which gives consistent
+    // polish quality across the full transcript.
     var polished: [String] = payload.utterances.map { $0.text }
 
     let total = payload.utterances.count
@@ -80,21 +177,29 @@ guard let payload = try? JSONDecoder().decode(InPayload.self, from: inputData) e
       let original = utterance.text
       if original.trimmingCharacters(in: .whitespaces).isEmpty { continue }
 
+      let session = LanguageModelSession(instructions: instructions)
       do {
         let response = try await session.respond(to: original)
         let candidate = response.content
           .trimmingCharacters(in: .whitespacesAndNewlines)
         if candidate.isEmpty { continue }
 
-        // Safety check: drop polished text if word count drifted >20% (the
-        // model may have hallucinated, dropped words, or added commentary).
-        let originalCount = wordCount(original)
-        let newCount = wordCount(candidate)
-        if originalCount > 0 {
-          let drift = abs(Double(newCount - originalCount)) / Double(originalCount)
-          if drift > 0.2 { continue }
+        // Word-preservation check: polish must contain exactly the same
+        // word sequence as the original. If it doesn't, try a merge that
+        // splices missing original words back in and drops hallucinations
+        // (see mergePolishedPunctuation). Falls back to original text if
+        // the merge can't reconcile.
+        if wordTokens(original) == wordTokens(candidate) {
+          polished[idx] = candidate
+        } else {
+          let merged = mergePolishedPunctuation(original: original, polished: candidate)
+          if wordTokens(merged) == wordTokens(original) {
+            writeStderr("Polish merged (word mismatch recovered) on utterance \(idx)\n")
+            polished[idx] = merged
+          } else {
+            writeStderr("Polish rejected (merge failed) on utterance \(idx)\n")
+          }
         }
-        polished[idx] = candidate
       } catch {
         writeStderr("Polish failed on utterance \(idx): \(error)\n")
         // Keep the original text for this utterance and continue.

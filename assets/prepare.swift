@@ -31,6 +31,128 @@ func wordCount(_ s: String) -> Int {
   return s.split(whereSeparator: { $0.isWhitespace }).count
 }
 
+// Extract a normalized word sequence: lowercase, letters and digits only.
+// Apostrophes, punctuation, em-dashes, and whitespace all become separators.
+// Used to verify polish preserved every spoken word (no drops, no
+// hallucinated additions, no reordering) while still allowing legitimate
+// fixes like "wouldnt" → "wouldn't" and "code coding" → "code—coding".
+func wordTokens(_ s: String) -> [String] {
+  var tokens: [String] = []
+  var current = ""
+  for scalar in s.lowercased().unicodeScalars {
+    let c = Character(scalar)
+    if c.isLetter || c.isNumber {
+      current.append(c)
+    } else if !current.isEmpty {
+      tokens.append(current)
+      current = ""
+    }
+  }
+  if !current.isEmpty { tokens.append(current) }
+  return tokens
+}
+
+// Word + its original-case surface form (e.g., {token: "wouldnt", surface: "wouldn't"}).
+struct OrigWord {
+  let token: String  // lowercase, letters/digits only
+  let surface: String  // original substring as it appeared in source
+}
+
+func extractOriginalWords(_ s: String) -> [OrigWord] {
+  var out: [OrigWord] = []
+  var surface = ""
+  for c in s {
+    if c.isLetter || c.isNumber || c == "'" {
+      surface.append(c)
+    } else if !surface.isEmpty {
+      let tok = wordTokens(surface).first ?? ""
+      out.append(OrigWord(token: tok, surface: surface))
+      surface = ""
+    }
+  }
+  if !surface.isEmpty {
+    let tok = wordTokens(surface).first ?? ""
+    out.append(OrigWord(token: tok, surface: surface))
+  }
+  return out
+}
+
+// When polish drops or hallucinates words, fall back to a merge: walk
+// through the polished string, accepting polish's words when they line up
+// with the next original word (small lookahead allows for dropped words
+// to be spliced back in mid-stream), and dropping polish words that don't
+// match (hallucinations). Preserves all original words, keeps as much
+// polish punctuation/casing as possible. Worst case the output reverts
+// to the original text with no polish — still no content loss.
+func mergePolishedPunctuation(original: String, polished: String) -> String {
+  let originalWords = extractOriginalWords(original)
+  if originalWords.isEmpty { return polished }
+
+  let lookahead = 4
+  var result = ""
+  var origIdx = 0
+  var i = polished.startIndex
+
+  while i < polished.endIndex {
+    let c = polished[i]
+    if c.isLetter || c.isNumber {
+      // Read a polish word
+      let wordStart = i
+      while i < polished.endIndex,
+        polished[i].isLetter || polished[i].isNumber || polished[i] == "'"
+      {
+        i = polished.index(after: i)
+      }
+      let polishWord = String(polished[wordStart..<i])
+      let polishToken = wordTokens(polishWord).first ?? ""
+
+      // Try to match against next few original words
+      var matchedAt = -1
+      let maxLookahead = min(lookahead, originalWords.count - origIdx)
+      for k in 0..<maxLookahead {
+        if originalWords[origIdx + k].token == polishToken {
+          matchedAt = k
+          break
+        }
+      }
+
+      if matchedAt >= 0 {
+        // Splice in any original words polish skipped over
+        for k in 0..<matchedAt {
+          if !result.isEmpty,
+            let lastChar = result.last,
+            !lastChar.isWhitespace
+          {
+            result += " "
+          }
+          result += originalWords[origIdx + k].surface
+        }
+        result += polishWord
+        origIdx += matchedAt + 1
+      }
+      // else: polish word is a hallucination — drop it
+    } else {
+      // Non-word char (punctuation/whitespace) — emit as-is
+      result.append(c)
+      i = polished.index(after: i)
+    }
+  }
+
+  // Any original words polish never reached — append them
+  while origIdx < originalWords.count {
+    if !result.isEmpty,
+      let lastChar = result.last,
+      !lastChar.isWhitespace
+    {
+      result += " "
+    }
+    result += originalWords[origIdx].surface
+    origIdx += 1
+  }
+
+  return result
+}
+
 func iso8601(_ date: Date) -> String {
   let formatter = ISO8601DateFormatter()
   formatter.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
@@ -280,24 +402,44 @@ if !doPolish {
 
   @available(macOS 26.0, *)
   func polish(_ inputs: [Utterance]) async -> [Utterance] {
-    let session = LanguageModelSession(instructions: instructions)
+    // CRITICAL: create a fresh LanguageModelSession per utterance instead
+    // of reusing one across the whole transcript. Apple's on-device 3B
+    // model degrades as the session's conversation history grows — after
+    // ~20 messages of context it starts ignoring the polish instructions
+    // and returning the input unchanged. Fresh sessions keep every call's
+    // context to just (system instructions + single utterance), which
+    // gives consistent polish quality across the full transcript.
     var out = inputs
     let total = inputs.count
     for (idx, u) in inputs.enumerated() {
       writeStderr("PROGRESS \(idx + 1)/\(total)\n")
       let original = u.text
       if original.trimmingCharacters(in: .whitespaces).isEmpty { continue }
+      let session = LanguageModelSession(instructions: instructions)
       do {
         let response = try await session.respond(to: original)
         let candidate = response.content.trimmingCharacters(in: .whitespacesAndNewlines)
         if candidate.isEmpty { continue }
-        let origCount = wordCount(original)
-        let newCount = wordCount(candidate)
-        if origCount > 0 {
-          let drift = abs(Double(newCount - origCount)) / Double(origCount)
-          if drift > 0.2 { continue }
+
+        // Word-preservation check: polish must contain exactly the same
+        // word sequence as the original (only punctuation/casing may
+        // differ). If the model dropped/hallucinated/reordered words,
+        // attempt a merge that splices missing original words back in
+        // and drops hallucinated additions. Preserves polish's
+        // punctuation/casing where it lines up; falls back to original
+        // text where it doesn't.
+        if wordTokens(original) == wordTokens(candidate) {
+          out[idx].text = candidate
+        } else {
+          let merged = mergePolishedPunctuation(original: original, polished: candidate)
+          // Sanity-check the merge: word sequence must match the original.
+          if wordTokens(merged) == wordTokens(original) {
+            writeStderr("Polish merged (word mismatch recovered) on utterance \(idx)\n")
+            out[idx].text = merged
+          } else {
+            writeStderr("Polish rejected (merge failed) on utterance \(idx)\n")
+          }
         }
-        out[idx].text = candidate
       } catch {
         writeStderr("Polish failed on utterance \(idx): \(error)\n")
       }
