@@ -115,7 +115,7 @@ Open Raycast → ⌘ + , → Extensions → Audio Transcriber for Raycast.
 | **Parakeet binary path** | Full path to the `fluidaudiocli` binary. Required for Local Parakeet. See below. |
 | **Transcripts library folder** | Folder where every successful transcription auto-saves a JSON sidecar. Enables the **Review Transcriptions** browse command. Leave blank to keep the old "save next to source file" behavior with no library. |
 | **Alert when background transcription completes** | Off by default — background Parakeet jobs complete silently and you check Review Transcriptions when you're ready. Turn on to get a macOS notification + auto-open Raycast. See the Local Parakeet section for `terminal-notifier` install notes. |
-| **Polish Parakeet output (on-device)** | Off by default. When on, every Parakeet transcript is polished via Apple's on-device language model (FoundationModels framework) to add disfluency commas ("um", "ah"), em-dashes for self-corrections ("code coding" → "code—coding"), missing punctuation, and proper capitalization. Fully local — nothing leaves the machine, no API key, no cost. Requires macOS 26 Tahoe or later with Apple Intelligence enabled; on older macOS the setting silently no-ops. AssemblyAI already polishes server-side, so this only runs for Parakeet. |
+| **Polish Parakeet output (on-device)** | Off by default. When on, every Parakeet transcript is polished via Apple's on-device language model (FoundationModels framework) to add disfluency commas ("um", "ah"), em-dashes for self-corrections ("code coding" → "code—coding"), missing punctuation, and proper capitalization. Fully local — nothing leaves the machine, no API key, no cost. Polish runs inside the same detached background pipeline as transcription, so you can dismiss Raycast while it's working. Adds roughly 1-2 seconds per utterance (so ~2-3 minutes for an hour of audio). Requires macOS 26 Tahoe or later with Apple Intelligence enabled; on older macOS the setting silently no-ops. AssemblyAI already polishes server-side, so this only runs for Parakeet. |
 
 ## Local Parakeet backend (optional, Apple Silicon only)
 
@@ -125,13 +125,14 @@ The Local Parakeet backend runs transcription (NVIDIA Parakeet TDT v3) and speak
 
 ### How it works (background mode)
 
-Because Raycast kills its extension process the instant you dismiss the window, Parakeet transcriptions run as a **detached background job**:
+Raycast is a launcher — it kills its extension process the instant you dismiss the window. So Parakeet transcriptions run as a **fully detached background pipeline**: the entire chain (audio decoding, ASR, diarization, and optional LLM polish) lives in a shell script that the launcher disowns at submit time.
 
-1. Pick a file, hit **Start Transcription in Background**. A confirmation screen tells you what's happening.
-2. Close Raycast and go do other work — `fluidaudiocli` keeps running on its own.
-3. When it finishes, the transcript is silently added to your library. **Open Review Transcriptions periodically** to check on it (newest is at the top). If the job is still running when you reopen Transcribe, you'll see a "running in background" toast. If it errored, you'll see the last few lines of the log.
+1. Pick a file, hit **Start Transcription**. A confirmation screen tells you what's happening.
+2. **Close Raycast and go do other work.** Nothing requires the launcher to stay open — the pipeline runs to completion on its own.
+3. The pipeline produces a single `final.json` containing the canonical transcript. Only then does it mark the job done and (optionally) fire a notification.
+4. Reopen Raycast and run **Review Transcriptions** — your finished transcript is at the top. Or run **Transcribe** again, which also detects the completed job and pushes you straight to the result.
 
-Multiple jobs run in parallel and surface one at a time as you reopen the command.
+Multiple jobs run in parallel and surface one at a time. Errored jobs surface the last few lines of the run log when you reopen Transcribe.
 
 ### Optional: completion alerts
 
@@ -199,7 +200,7 @@ No Raycast changes needed — the binary path stays the same.
 - **Key terms** (proper noun boosting) are only supported by the AssemblyAI backend; they're silently ignored on Local Parakeet.
 - Very large video files (>1 GB) may time out during AssemblyAI upload. Extract the audio first with `ffmpeg` if you hit this.
 - AssemblyAI requires audio longer than ~160 ms.
-- Cancelling a transcription mid-flight isn't supported in this version. Detached Parakeet jobs continue even if you close Raycast — to kill one, run `pkill -f fluidaudiocli` in Terminal.
+- Cancelling a transcription mid-flight isn't supported in this version. Detached Parakeet jobs continue even if you close Raycast — to kill one, run `pkill -f fluidaudiocli` (or `pkill -f prepare.swift` if it's in the polish step) in Terminal.
 - Parakeet job state is stored in `~/Library/Caches/raycast-transcribe/jobs/`. Safe to delete that directory at any time; you'll only lose unviewed completed transcripts.
 
 ## License
