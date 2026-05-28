@@ -14,7 +14,6 @@ export interface Preferences {
   transcriptsFolder: string;
   notifyOnComplete: boolean;
   llmPolish: boolean;
-  anthropicApiKey: string;
 }
 
 export interface Utterance {

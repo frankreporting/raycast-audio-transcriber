@@ -348,108 +348,101 @@ export class LocalParakeetBackend implements TranscriptionBackend {
   }
 }
 
-// --- Optional LLM polish for Parakeet output ---
+// --- Optional on-device polish for Parakeet output ---
 //
 // Parakeet emits clean lowercase-ish text without disfluency punctuation
 // (no commas around "um"/"ah", no em-dashes for self-corrections like
-// "code coding"). When llmPolish is enabled we run the per-speaker text
-// through Claude Haiku to add those touches without changing the words.
-// AssemblyAI already does this server-side, so we only polish Parakeet.
-
-const POLISH_MODEL = "claude-haiku-4-5-20251001";
-
-const POLISH_SYSTEM_PROMPT = `You are polishing a raw automatic speech recognition transcript. Each input line is numbered and contains one speaker's utterance. Add punctuation, casing, and reading flow. CRITICAL RULES:
-
-1. DO NOT add, remove, or change any spoken words. Keep them in their exact original order.
-2. ADD commas around disfluencies and discourse markers: "um", "uh", "ah", "like", "you know", "I mean", "well", "so".
-3. USE em-dashes (—) for self-corrections, false starts, and the speaker searching for a word: "code coding" → "code—coding", "the the door" → "the—the door".
-4. ADD periods, commas, question marks, and quotation marks where they belong by spoken meaning.
-5. FIX capitalization: sentence starts, proper nouns, "I".
-6. PRESERVE the line numbering exactly: each output line starts with the same number followed by a colon and space.
-
-Return ONLY the numbered output lines in the same order. No preamble, no explanation, no markdown formatting around the lines.`;
-
-function countWords(text: string): number {
-  return text.trim().split(/\s+/).filter(Boolean).length;
-}
+// "code coding"). When llmPolish is enabled we run each utterance through
+// Apple's on-device language model (FoundationModels framework, macOS 26+)
+// via a bundled Swift helper script. Fully local — nothing leaves the
+// machine. AssemblyAI already polishes server-side, so we only polish
+// Parakeet output.
+//
+// The script lives at assets/polish.swift and is invoked via `swift`
+// (compiled+run on demand; takes ~1s startup but per-utterance calls are
+// fast once the session is warm). Exit code 2 from the script means
+// FoundationModels isn't available (older macOS) — we silently skip.
 
 export async function polishUtterances(
   utterances: Utterance[],
 ): Promise<Utterance[]> {
-  const { llmPolish, anthropicApiKey } = getPreferenceValues<Preferences>();
-  if (!llmPolish) return utterances;
-  if (!anthropicApiKey?.trim()) {
-    // Pref enabled but no key — silently skip rather than failing the whole
-    // transcription. The result is just unpolished, same as the default.
-    return utterances;
-  }
-  if (utterances.length === 0) return utterances;
+  const { llmPolish } = getPreferenceValues<Preferences>();
+  if (!llmPolish || utterances.length === 0) return utterances;
 
-  const numbered = utterances.map((u, i) => `${i}: ${u.text}`).join("\n");
-  // Generous max_tokens — output is roughly the same length as input plus a
-  // few punctuation chars per utterance. Cap at 8K for safety.
-  const inputTokensEstimate = Math.ceil(numbered.length / 3);
-  const maxTokens = Math.min(8000, Math.max(1024, inputTokensEstimate * 2));
-
-  let response: Response;
-  try {
-    response = await fetch("https://api.anthropic.com/v1/messages", {
-      method: "POST",
-      headers: {
-        "x-api-key": anthropicApiKey.trim(),
-        "anthropic-version": "2023-06-01",
-        "content-type": "application/json",
-      },
-      body: JSON.stringify({
-        model: POLISH_MODEL,
-        max_tokens: maxTokens,
-        system: POLISH_SYSTEM_PROMPT,
-        messages: [{ role: "user", content: numbered }],
-      }),
-    });
-  } catch (err) {
-    console.error("Polish request failed (network):", err);
+  // Lazy-import @raycast/api environment to avoid circular concerns at
+  // module load; this function is only called from runtime code paths.
+  const { environment } = await import("@raycast/api");
+  const scriptPath = path.join(environment.assetsPath, "polish.swift");
+  if (!fs.existsSync(scriptPath)) {
+    console.error("Polish script not found at", scriptPath);
     return utterances;
   }
 
-  if (!response.ok) {
-    const body = await response.text().catch(() => "");
-    console.error(`Polish API ${response.status}:`, body.slice(0, 500));
-    return utterances;
-  }
-
-  let data: { content?: Array<{ text?: string }> };
-  try {
-    data = (await response.json()) as typeof data;
-  } catch {
-    return utterances;
-  }
-
-  const polishedText = data.content?.[0]?.text ?? "";
-  if (!polishedText) return utterances;
-
-  // Parse numbered lines back. Map by index so order issues are recoverable.
-  const cleaned = new Map<number, string>();
-  for (const line of polishedText.split(/\r?\n/)) {
-    const match = line.match(/^(\d+):\s?(.*)$/);
-    if (match) {
-      cleaned.set(parseInt(match[1], 10), match[2]);
-    }
-  }
-
-  // Per-utterance safety check: if the polished version's word count drifts
-  // by more than 20% from the original, fall back to the unpolished text for
-  // that single utterance (the model may have hallucinated or dropped words).
-  return utterances.map((u, i) => {
-    const polished = cleaned.get(i);
-    if (!polished) return u;
-    const origCount = countWords(u.text);
-    const newCount = countWords(polished);
-    if (origCount === 0) return u;
-    const drift = Math.abs(newCount - origCount) / origCount;
-    if (drift > 0.2) return u;
-    return { ...u, text: polished };
+  const payload = JSON.stringify({
+    utterances: utterances.map((u) => ({ text: u.text })),
   });
+
+  const result = await new Promise<{
+    ok: boolean;
+    stdout: string;
+    stderr: string;
+  }>((resolve) => {
+    const child = spawn("swift", [scriptPath], {
+      stdio: ["pipe", "pipe", "pipe"],
+    });
+    let stdout = "";
+    let stderr = "";
+    child.stdout.on("data", (chunk: Buffer) => {
+      stdout += chunk.toString();
+    });
+    child.stderr.on("data", (chunk: Buffer) => {
+      stderr += chunk.toString();
+    });
+    child.on("error", (err) => {
+      resolve({ ok: false, stdout: "", stderr: String(err) });
+    });
+    child.on("close", (code) => {
+      // Exit code 2 = FoundationModels unavailable (older macOS); treat as
+      // a soft skip. Code 0 = success. Anything else = treat as failure.
+      resolve({ ok: code === 0, stdout, stderr });
+    });
+    child.stdin.write(payload);
+    child.stdin.end();
+  });
+
+  if (!result.ok) {
+    if (result.stderr.includes("FoundationModels")) {
+      console.warn("Polish skipped:", result.stderr.trim());
+    } else {
+      console.error("Polish script failed:", result.stderr.trim());
+    }
+    return utterances;
+  }
+
+  let parsed: { utterances: Array<{ text: string }> };
+  try {
+    parsed = JSON.parse(result.stdout);
+  } catch {
+    console.error("Polish output not valid JSON:", result.stdout.slice(0, 200));
+    return utterances;
+  }
+  if (
+    !Array.isArray(parsed.utterances) ||
+    parsed.utterances.length !== utterances.length
+  ) {
+    console.error(
+      "Polish output utterance count mismatch:",
+      parsed.utterances?.length,
+      "vs",
+      utterances.length,
+    );
+    return utterances;
+  }
+
+  return utterances.map((u, i) => ({
+    ...u,
+    text: parsed.utterances[i].text || u.text,
+  }));
 }
 
 // --- Backend selection ---
